@@ -112,7 +112,7 @@ def get_image_files(image_folder):
     for ext in exts:
         files.extend(glob(os.path.join(image_folder, f'*.{ext}')))
         files.extend(glob(os.path.join(image_folder, f'*.{ext.upper()}')))
-    return sorted(files)
+    return sorted(os.path.abspath(f) for f in files)
 
 def encode_frames_to_video(frames_dir, output_path, fps, native_fps:int=None,
                            start_frame=None, end_frame=None):
@@ -162,8 +162,9 @@ def encode_frames_to_video(frames_dir, output_path, fps, native_fps:int=None,
         "-safe", "0",
         "-r", str(fps),
         "-i", filelist_path,
-        "-c:v", "libopenh264",
+        "-c:v", "libx264",
         "-b:v", "4M",
+        "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         output_path,
@@ -548,6 +549,296 @@ class TrackingDataset(Dataset):
 
 
 # ── Dataset subclasses ──────────────────────────────────────────────────────
+
+
+class PanAf(TrackingDataset):
+    """PanAf great ape tracking dataset.
+
+    Uses COCO-format bbox annotations with pre-extracted frames.
+    Frames are stored flat (all videos in one JPEGImages/ dir, not split by train/val).
+    Splits are determined by per-split COCO JSONs in annotations/.
+
+    Directory layout:
+        VIDEO_TRACK_DATA_HOME/PanAf/
+        ├── JPEGImages/{video_id}/{frame}.jpg   # symlink to raw frames
+        ├── annotations/{split}.json            # per-split COCO JSONs
+        ├── videos/{video_id}.mp4               # encoded by download()
+        └── MasksRLE/{video_id}.json            # bbox-derived masks for eval
+    """
+    DATASET_NAME = "panaf"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
+    VIDEO_FPS = 18
+    TASKS = ["track"]
+    SPLIT_MAP = {
+        # "train": "train",
+        # "validation": "val",
+        # "test": "val",
+        "sample": "val_sample"
+    }
+
+    @classmethod
+    def _get_anno_path(cls, data_split):
+        return join(cls.VIDEO_HOME, "annotations", f"{data_split}.json")
+
+    @classmethod
+    def _load_coco_json(cls, data_split):
+        anno_path = cls._get_anno_path(data_split)
+        assert exists(anno_path), f"Annotation file not found: {anno_path}"
+        with open(anno_path, 'r') as f:
+            return json.load(f)
+
+    @classmethod
+    def _get_frames_dir(cls, data_split, video_name):
+        # Frames are flat — not organized by split
+        return join(cls.VIDEO_HOME, "JPEGImages", video_name)
+
+    @classmethod
+    def _get_video_dir(cls, data_split):
+        # Single videos dir for all splits
+        return join(cls.VIDEO_HOME, "videos")
+
+    # ── Loading ────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _load_all_dataset_and_fps(cls, overwrite_cache=True):
+        video_fps = {}
+        for data_split in set(cls.SPLIT_MAP.values()):
+            coco = cls._load_coco_json(data_split)
+            video_ids = {img['video_id'] for img in coco['images']}
+            for vid in video_ids:
+                video_fps[(data_split, vid)] = cls.VIDEO_FPS
+        return video_fps
+
+    def load(self):
+        coco = self._load_coco_json(self.data_split)
+
+        # Index images and annotations by video
+        image_by_id = {img['id']: img for img in coco['images']}
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['video_id'], []).append(img)
+
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        # Build one example per video
+        data = []
+        for video_id, images in sorted(images_by_video.items()):
+            images = sorted(images, key=lambda x: x['frame_id'])
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+            example = self._build_video_annotation(video_id, images, video_annots)
+            data.append(example)
+
+        self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} videos for split={self.data_split}")
+        return data
+
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        """Convert COCO images + annotations for one video into tracking format.
+
+        Args:
+            video_id: Video identifier string.
+            images: Sorted list of COCO image dicts for this video.
+            annotations: List of COCO annotation dicts for this video.
+        """
+        height = images[0]['height']
+        width = images[0]['width']
+        n_frames = len(images)
+
+        # Map image_id -> frame_idx (0-based)
+        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+        # Find unique ape_ids and create stable anno_ids
+        ape_ids = sorted({ann['ape_id'] for ann in annotations})
+        # anno_id: "{min_annotation_id:06d}_{ape_id}" for global uniqueness
+        min_ann_id = min(ann['id'] for ann in annotations) if annotations else 0
+        anno_id_map = {ape_id: f"{min_ann_id:06d}_{ape_id}" for ape_id in ape_ids}
+        anno_ids = [anno_id_map[a] for a in ape_ids]
+        # obj_id index: ape_id -> 0, 1, 2...
+        ape_id_to_obj = {ape_id: idx for idx, ape_id in enumerate(ape_ids)}
+
+        # Group annotations by (frame_idx, ape_id) -> bbox
+        bbox_lookup = {}
+        for ann in annotations:
+            frame_idx = image_id_to_frame.get(ann['image_id'])
+            if frame_idx is None:
+                continue
+            bbox_lookup[(frame_idx, ann['ape_id'])] = ann['bbox']
+
+        # Build frame_trajectories
+        frame_trajectories = []
+        for frame_idx in range(n_frames):
+            points = []
+            for ape_id in ape_ids:
+                bbox = bbox_lookup.get((frame_idx, ape_id))
+                if bbox is None:
+                    continue
+                x, y, w, h = bbox
+                points.append({
+                    "id": ape_id_to_obj[ape_id],
+                    "point": [x + w / 2, y + h / 2],
+                    "occluded": False,
+                })
+            frame_trajectories.append({
+                "frame": frame_idx,
+                "time": frame_idx / cls.VIDEO_FPS,
+                "points": points,
+            })
+
+        return {
+            "id": video_id,
+            "video": video_id,
+            "expression": "ape",
+            "height": height,
+            "width": width,
+            "fps": cls.VIDEO_FPS,
+            "sampling_fps": cls.VIDEO_FPS,
+            "mask_id": [str(i) for i in range(len(ape_ids))],
+            "obj_id": [str(i) for i in range(len(ape_ids))],
+            "anno_id": anno_ids,
+            "qid": video_id,
+            "frame_trajectories": frame_trajectories,
+        }
+
+    # ── GT masks (bbox rectangles → COCO RLE) ─────────────────────────────
+
+    @staticmethod
+    def _bbox_to_rle(bbox, height, width):
+        """Convert a COCO [x, y, w, h] bbox to a COCO RLE mask dict."""
+        from pycocotools import mask as mask_utils
+        mask = np.zeros((height, width), dtype=np.uint8, order='F')
+        bx, by, bw, bh = [int(round(v)) for v in bbox]
+        # Clamp to image bounds
+        x1 = max(0, bx)
+        y1 = max(0, by)
+        x2 = min(width, bx + bw)
+        y2 = min(height, by + bh)
+        mask[y1:y2, x1:x2] = 1
+        rle = mask_utils.encode(mask)
+        # Convert bytes to str for JSON serialization
+        rle['counts'] = rle['counts'].decode('utf-8')
+        return rle
+
+    @classmethod
+    def _precompute_gt_masks(cls):
+        for data_split in set(cls.SPLIT_MAP.values()):
+            cls._precompute_gt_masks_for_split(data_split)
+
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """Convert bbox annotations to RLE masks and save per-video JSON.
+
+        Saves to: VIDEO_HOME/MasksRLE/{video_id}.json
+        Format: {mask_idx: [rle_or_none_per_frame, ...], ...}
+        """
+        coco = cls._load_coco_json(data_split)
+        image_by_id = {img['id']: img for img in coco['images']}
+
+        # Group images and annotations by video
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['video_id'], []).append(img)
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        output_dir = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_dir, exist_ok=True)
+
+        n_encoded = 0
+        n_skipped = 0
+        for video_id, images in tqdm(sorted(images_by_video.items()),
+                                     desc=f"Encoding GT masks ({data_split})"):
+            output_path = join(output_dir, f"{video_id}.json")
+            if exists(output_path):
+                n_skipped += 1
+                continue
+
+            images = sorted(images, key=lambda x: x['frame_id'])
+            height, width = images[0]['height'], images[0]['width']
+            n_frames = len(images)
+            image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+            # Collect all annotations for this video
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+            ape_ids = sorted({ann['ape_id'] for ann in video_annots})
+
+            # Group by (frame_idx, ape_id) -> bbox
+            bbox_lookup = {}
+            for ann in video_annots:
+                frame_idx = image_id_to_frame.get(ann['image_id'])
+                if frame_idx is not None:
+                    bbox_lookup[(frame_idx, ann['ape_id'])] = ann['bbox']
+
+            # Build mask_annot: {mask_idx: [rle_or_none per frame]}
+            mask_annot = {}
+            for obj_idx, ape_id in enumerate(ape_ids):
+                frame_masks = []
+                for frame_idx in range(n_frames):
+                    bbox = bbox_lookup.get((frame_idx, ape_id))
+                    if bbox is None:
+                        frame_masks.append(None)
+                    else:
+                        frame_masks.append(cls._bbox_to_rle(bbox, height, width))
+                mask_annot[obj_idx] = frame_masks
+
+            with open(output_path, 'w') as f:
+                json.dump(mask_annot, f)
+            n_encoded += 1
+
+        log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
+                 f"{n_encoded} new, {n_skipped} already exist, "
+                 f"out of {len(images_by_video)} videos.")
+
+    # ── Item retrieval ─────────────────────────────────────────────────────
+
+    def get(self, idx, rng):
+        ex = self.data[idx]
+        video_path = join(self.video_dir, ex['video'] + '.mp4')
+        message_list = self._create_message_list(ex)
+
+        metadata = {
+            'example_id': ex['id'],
+            'task': self.task,
+            'expression': ex['expression'],
+            'w': ex['width'],
+            'h': ex['height'],
+            'video_fps': ex.get('fps', self.VIDEO_FPS),
+            'video': ex['video'],
+        }
+
+        if self.use_fps_sampling:
+            metadata['sampler_overrides'] = {
+                'frame_sample_mode': 'fps',
+                'candidate_sampling_fps': self._get_candidate_fps(
+                    ex.get('fps', self.VIDEO_FPS)),
+                'min_fps': ex['sampling_fps'],
+            }
+
+        item = {
+            'video': video_path,
+            'message_list': message_list,
+            'sampling_fps': ex['sampling_fps'],
+            'metadata': metadata,
+        }
+
+        if self.is_eval:
+            masks_path = join(self.VIDEO_HOME, "MasksRLE", f"{ex['video']}.json")
+            if exists(masks_path):
+                with open(masks_path, 'r') as f:
+                    masks = json.load(f)
+                item['metadata']['masks'] = masks
+                item['metadata']['mask_id'] = ex['mask_id']
+                if "points" in item['message_list'][0]:
+                    item['metadata']['points'] = item['message_list'][0]['points']
+
+        return item
 
 
 class Mevis(TrackingDataset):

@@ -328,7 +328,7 @@ def example_to_html_dict(ex, preprocessor, show_patches=False, show_crops=False,
             image_cells = []
             for frame_ix, boxes in sorted(frame_to_boxe.items(), key=lambda x: x[0]):
                 frame = video_frames.frames[frame_ix]
-                image_src = build_image_asset(frame, "/data/chrisc/viz")
+                image_src = build_image_asset(frame, asset_cache)
                 image_cells.append(get_html_image_with_boxes(image_src, boxes, max_dim=288, img_size=[w, h]))
             out["points"] = "\n".join(image_cells)
     elif "image" in metadata:

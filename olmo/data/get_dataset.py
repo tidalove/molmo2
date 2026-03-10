@@ -17,6 +17,7 @@ from olmo.data.academic_video_datasets import (
     TVQA, NeXTQA, CharadesSTA
 )
 from olmo.data.academic_video_track_datasets import (
+    PanAf,
     Mevis, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
     LVVIS, YTVIS, ViCaS, ReVOS, MoCA,
     LVOSv1, LVOSv2, LaSOT, UWCOT, WebUOT, LaTOT, TNL2K, TNLLT,
@@ -356,8 +357,15 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         return CharadesSTA(split=split, task="all")
     if dataset_name == "charades_sta_all_qa":
         return CharadesSTA(split=split, task="all", qa_format=True)
-    #### 
+    ####
     # Academic video object tracking datasets
+    # panaf: track
+    if dataset_name == "panaf_track":
+        return PanAf(split=split, task="track")
+    if dataset_name == "panaf_track_1fps":
+        return PanAf(split=split, task="track", sampling_fps=1)
+    if dataset_name == "panaf_track_eval_1fps": # Used for eval
+        return PanAf(split=split, task="track", sampling_fps=1)
     # mevis: track, ground, single_point_track
     if dataset_name == "mevis_track": # Uses [1,2] sampling fps by default.
         return Mevis(split=split, task="track")

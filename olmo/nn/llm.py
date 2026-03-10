@@ -1404,7 +1404,10 @@ class RotaryEmbedding(nn.Module):
                 batch_size = q_.shape[0]
                 query_len, key_len = q_.shape[-2], k_.shape[-2]  # could be different if layer_past not None
                 if position_ids is not None:
-                    freqs_cis_len = (self.config.max_position_embeddings or self.config.max_sequence_length)
+                    freqs_cis_len = max(
+                        self.config.max_position_embeddings or self.config.max_sequence_length,
+                        key_len
+                    )
                 else:
                     freqs_cis_len = key_len
                 pos_sin, pos_cos = self.get_rotary_embedding(freqs_cis_len, q_.device)
