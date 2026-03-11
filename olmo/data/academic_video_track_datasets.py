@@ -1039,9 +1039,16 @@ class CFC(LocalTrackingDataset):
     TASKS = ['track']
     VIDEO_FPS = 24
     SPLIT_MAP = {
-        "sample": "val_sample"
+        # "train": "kenai-train-subsampled",
+        # "validation": "kenai-val",
+        "sample": "val_sample",
     }
     EXPRESSION = "fish"
+
+    def _create_message_list(self, ex):
+        message_list = super()._create_message_list(ex)
+        message_list[0]['prepend'] = ex.get('prepend')
+        return message_list
 
     def load(self):
         coco = self._load_coco_json(self.data_split)
@@ -1112,7 +1119,7 @@ class CFC(LocalTrackingDataset):
             frame_idx = image_id_to_frame.get(ann['image_id'])
             if frame_idx is None:
                 continue
-            bbox_lookup[(frame_idx, ann['fish_id'])] = ann['bbox']
+            bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
 
         # Build frame_trajectories
         frame_trajectories = []
@@ -1147,6 +1154,7 @@ class CFC(LocalTrackingDataset):
             "anno_id": anno_ids,
             "qid": video_id,
             "frame_trajectories": frame_trajectories,
+            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
         }
     
     @classmethod
@@ -1159,10 +1167,11 @@ class CFC(LocalTrackingDataset):
         coco = cls._load_coco_json(data_split)
         image_by_id = {img['id']: img for img in coco['images']}
 
-        # Group images and annotations by video
+        # Group images and annotations by video (derive video_id from filename)
         images_by_video = {}
         for img in coco['images']:
-            images_by_video.setdefault(img['video_id'], []).append(img)
+            vid = img['file_name'][:img['file_name'].rfind('_')]
+            images_by_video.setdefault(vid, []).append(img)
         annots_by_image = {}
         for ann in coco['annotations']:
             annots_by_image.setdefault(ann['image_id'], []).append(ann)
@@ -1179,7 +1188,7 @@ class CFC(LocalTrackingDataset):
                 n_skipped += 1
                 continue
 
-            images = sorted(images, key=lambda x: x['frame_id'])
+            images = sorted(images, key=lambda x: x['file_name'][x['file_name'].rfind('_'):x['file_name'].rfind('.')])
             height, width = images[0]['height'], images[0]['width']
             n_frames = len(images)
             image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
@@ -1190,7 +1199,7 @@ class CFC(LocalTrackingDataset):
                 video_annots.extend(annots_by_image.get(img['id'], []))
             fish_ids = sorted({ann['track_id'] for ann in video_annots})
 
-            # Group by (frame_idx, ape_id) -> bbox
+            # Group by (frame_idx, track_id) -> bbox
             bbox_lookup = {}
             for ann in video_annots:
                 frame_idx = image_id_to_frame.get(ann['image_id'])
