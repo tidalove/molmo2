@@ -1392,6 +1392,7 @@ class DataFormatter(BaseConfig):
         style = example["style"]
         label = example["label"]
         sampling_fps = example["sampling_fps"]
+        prepend = example.get("prepend", None)
         input_points = None
         scale = self._get_scale(example)
 
@@ -1474,6 +1475,10 @@ class DataFormatter(BaseConfig):
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1["video_point_track_per_frame_default_fps"], prompt_keywords, rng, dbg=self.debug)
             else:
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], prompt_keywords, rng, dbg=self.debug)
+        
+        if prepend is not None:
+            prompt = prepend + prompt
+
         return prompt, output
 
     def format_video_point_track_points(self, example, initial_points):

@@ -107,12 +107,13 @@ def _load_hf_dataset(hf_source, split, local_name=None, config=None, overwrite_c
     return ds
 
 def get_image_files(image_folder):
+    from natsort import natsorted
     exts = ['jpg', 'jpeg', 'png', 'gif']
     files = []
     for ext in exts:
         files.extend(glob(os.path.join(image_folder, f'*.{ext}')))
         files.extend(glob(os.path.join(image_folder, f'*.{ext.upper()}')))
-    return sorted(os.path.abspath(f) for f in files)
+    return natsorted(os.path.abspath(f) for f in files)
 
 def encode_frames_to_video(frames_dir, output_path, fps, native_fps:int=None,
                            start_frame=None, end_frame=None):
@@ -550,11 +551,10 @@ class TrackingDataset(Dataset):
 
 # ── Dataset subclasses ──────────────────────────────────────────────────────
 
+class LocalTrackingDataset(TrackingDataset):
+    """Tracking dataset for pre-extracted frames.
 
-class PanAf(TrackingDataset):
-    """PanAf great ape tracking dataset.
-
-    Uses COCO-format bbox annotations with pre-extracted frames.
+    Uses COCO-format bbox annotations.
     Frames are stored flat (all videos in one JPEGImages/ dir, not split by train/val).
     Splits are determined by per-split COCO JSONs in annotations/.
 
@@ -565,15 +565,14 @@ class PanAf(TrackingDataset):
         ├── videos/{video_id}.mp4               # encoded by download()
         └── MasksRLE/{video_id}.json            # bbox-derived masks for eval
     """
-    DATASET_NAME = "panaf"
-    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
-    VIDEO_FPS = 18
-    TASKS = ["track"]
+    DATASET_NAME = None
+    VIDEO_HOME = VIDEO_TRACK_DATA_HOME
+    VIDEO_FPS = 6
+    TASKS = []
     SPLIT_MAP = {
-        # "train": "train",
-        # "validation": "val",
-        # "test": "val",
-        "sample": "val_sample"
+        "train": "train",
+        "validation": "validation",
+        "test": "test",
     }
 
     @classmethod
@@ -608,6 +607,16 @@ class PanAf(TrackingDataset):
             for vid in video_ids:
                 video_fps[(data_split, vid)] = cls.VIDEO_FPS
         return video_fps
+    
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        # overwrite this for custom dataset annotation format
+        return NotImplementedError()
+
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        # overwrite this for custom mask computation
+        return NotImplementedError()
 
     def load(self):
         coco = self._load_coco_json(self.data_split)
@@ -635,6 +644,88 @@ class PanAf(TrackingDataset):
         self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
         log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} videos for split={self.data_split}")
         return data
+
+    # ── GT masks (bbox rectangles → COCO RLE) ─────────────────────────────
+
+    @staticmethod
+    def _bbox_to_rle(bbox, height, width):
+        """Convert a COCO [x, y, w, h] bbox to a COCO RLE mask dict."""
+        from pycocotools import mask as mask_utils
+        mask = np.zeros((height, width), dtype=np.uint8, order='F')
+        bx, by, bw, bh = [int(round(v)) for v in bbox]
+        # Clamp to image bounds
+        x1 = max(0, bx)
+        y1 = max(0, by)
+        x2 = min(width, bx + bw)
+        y2 = min(height, by + bh)
+        mask[y1:y2, x1:x2] = 1
+        rle = mask_utils.encode(mask)
+        # Convert bytes to str for JSON serialization
+        rle['counts'] = rle['counts'].decode('utf-8')
+        return rle
+
+    @classmethod
+    def _precompute_gt_masks(cls):
+        for data_split in set(cls.SPLIT_MAP.values()):
+            cls._precompute_gt_masks_for_split(data_split)
+
+    # ── Item retrieval ─────────────────────────────────────────────────────
+
+    def get(self, idx, rng):
+        ex = self.data[idx]
+        video_path = join(self.video_dir, ex['video'] + '.mp4')
+        message_list = self._create_message_list(ex)
+
+        metadata = {
+            'example_id': ex['id'],
+            'task': self.task,
+            'expression': ex['expression'],
+            'w': ex['width'],
+            'h': ex['height'],
+            'video_fps': ex.get('fps', self.VIDEO_FPS),
+            'video': ex['video'],
+        }
+
+        if self.use_fps_sampling:
+            metadata['sampler_overrides'] = {
+                'frame_sample_mode': 'fps',
+                'candidate_sampling_fps': self._get_candidate_fps(
+                    ex.get('fps', self.VIDEO_FPS)),
+                'min_fps': ex['sampling_fps'],
+            }
+
+        item = {
+            'video': video_path,
+            'message_list': message_list,
+            'sampling_fps': ex['sampling_fps'],
+            'metadata': metadata,
+        }
+
+        if self.is_eval:
+            masks_path = join(self.VIDEO_HOME, "MasksRLE", f"{ex['video']}.json")
+            if exists(masks_path):
+                with open(masks_path, 'r') as f:
+                    masks = json.load(f)
+                item['metadata']['masks'] = masks
+                item['metadata']['mask_id'] = ex['mask_id']
+                if "points" in item['message_list'][0]:
+                    item['metadata']['points'] = item['message_list'][0]['points']
+
+        return item
+
+class PanAf(LocalTrackingDataset):
+    """
+    PanAf-specific methods for extracting ground truth tracks and masks.
+    """
+
+    DATASET_NAME = "panaf"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
+    TASKS = ['track']
+    VIDEO_FPS = 18
+    SPLIT_MAP = {
+        "sample": "val_sample"
+    }
+    EXPRESSION = "ape"
 
     @classmethod
     def _build_video_annotation(cls, video_id, images, annotations):
@@ -692,7 +783,7 @@ class PanAf(TrackingDataset):
         return {
             "id": video_id,
             "video": video_id,
-            "expression": "ape",
+            "expression": cls.EXPRESSION,
             "height": height,
             "width": width,
             "fps": cls.VIDEO_FPS,
@@ -703,31 +794,7 @@ class PanAf(TrackingDataset):
             "qid": video_id,
             "frame_trajectories": frame_trajectories,
         }
-
-    # ── GT masks (bbox rectangles → COCO RLE) ─────────────────────────────
-
-    @staticmethod
-    def _bbox_to_rle(bbox, height, width):
-        """Convert a COCO [x, y, w, h] bbox to a COCO RLE mask dict."""
-        from pycocotools import mask as mask_utils
-        mask = np.zeros((height, width), dtype=np.uint8, order='F')
-        bx, by, bw, bh = [int(round(v)) for v in bbox]
-        # Clamp to image bounds
-        x1 = max(0, bx)
-        y1 = max(0, by)
-        x2 = min(width, bx + bw)
-        y2 = min(height, by + bh)
-        mask[y1:y2, x1:x2] = 1
-        rle = mask_utils.encode(mask)
-        # Convert bytes to str for JSON serialization
-        rle['counts'] = rle['counts'].decode('utf-8')
-        return rle
-
-    @classmethod
-    def _precompute_gt_masks(cls):
-        for data_split in set(cls.SPLIT_MAP.values()):
-            cls._precompute_gt_masks_for_split(data_split)
-
+    
     @classmethod
     def _precompute_gt_masks_for_split(cls, data_split):
         """Convert bbox annotations to RLE masks and save per-video JSON.
@@ -796,49 +863,360 @@ class PanAf(TrackingDataset):
                  f"{n_encoded} new, {n_skipped} already exist, "
                  f"out of {len(images_by_video)} videos.")
 
-    # ── Item retrieval ─────────────────────────────────────────────────────
+class PanAfICL(PanAf):
+    """PanAf with in-context learning: first portion of video has GT points
+    burned into frames as blue dots; model must continue tracking afterward."""
 
-    def get(self, idx, rng):
-        ex = self.data[idx]
-        video_path = join(self.video_dir, ex['video'] + '.mp4')
-        message_list = self._create_message_list(ex)
+    DATASET_NAME = "panaf_icl"
+    VIDEO_FPS = 18
+    FRAME_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAfICL")
+    TASKS = ['track']
+    SPLIT_MAP = {
+        "sample": "val_sample"
+    }
+    EXPRESSION = "marked and unmarked ape"
+    SPLIT_FRAME_FACTOR = 1/3
 
-        metadata = {
-            'example_id': ex['id'],
-            'task': self.task,
-            'expression': ex['expression'],
-            'w': ex['width'],
-            'h': ex['height'],
-            'video_fps': ex.get('fps', self.VIDEO_FPS),
-            'video': ex['video'],
+    POINT_COLOR = (255, 0, 0)  # blue (BGR)
+    POINT_RADIUS = 5
+
+    @classmethod
+    def _prepend_prompt(cls, split_frame_idx):
+        split_time = split_frame_idx / cls.VIDEO_FPS
+        return (f"Apes in the video are marked with blue points until timestamp "
+                f"{split_time:.1f}, after which they are unmarked, "
+                f"and new apes may enter the video. ")
+
+    @classmethod
+    def _get_split_idx(cls, frame_trajectories):
+        """Find the frame index at the 1/3 mark of annotated frames.
+
+        Returns the frame index of the first annotated frame AFTER the first
+        SPLIT_FRAME_FACTOR of all annotated frames.
+        """
+        annotated_frames = [ft['frame'] for ft in frame_trajectories if ft['points']]
+        if not annotated_frames:
+            return 0
+        cutoff = int(len(annotated_frames) * cls.SPLIT_FRAME_FACTOR)
+        # Clamp to valid range (at least 1 annotated frame in context)
+        cutoff = max(1, min(cutoff, len(annotated_frames) - 1))
+        return annotated_frames[cutoff]
+
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        # Reuse PanAf's annotation builder, then add ICL-specific fields
+        result = PanAf._build_video_annotation.__func__(cls, video_id, images, annotations)
+        split_idx = cls._get_split_idx(result['frame_trajectories'])
+        result['split_frame_idx'] = split_idx
+        result['prepend'] = cls._prepend_prompt(split_idx)
+        return result
+
+    def _create_message_list(self, ex):
+        message_list = super()._create_message_list(ex)
+        message_list[0]['prepend'] = ex.get('prepend')
+        return message_list
+
+    @classmethod
+    def _prepare_annotation_dir(cls, n_procs=1):
+        """Create annotated frames with GT points drawn on the context portion.
+
+        For each video, frames before split_frame_idx get blue dots at GT bbox
+        midpoints; frames after are copied unchanged. Source frames come from
+        FRAME_HOME (the original PanAf JPEGImages).
+        """
+        import shutil
+
+        for data_split in set(cls.SPLIT_MAP.values()):
+            coco = cls._load_coco_json(data_split)
+
+            # Build per-video annotation data (same as load() does)
+            images_by_video = {}
+            for img in coco['images']:
+                images_by_video.setdefault(img['video_id'], []).append(img)
+            annots_by_image = {}
+            for ann in coco['annotations']:
+                annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+            for video_id, images in tqdm(sorted(images_by_video.items()),
+                                         desc=f"Preparing ICL frames ({data_split})"):
+                output_dir = cls._get_frames_dir(data_split, video_id)
+                if exists(output_dir):
+                    continue  # already done
+
+                # Build annotation to get split_frame_idx and GT points
+                images_sorted = sorted(images, key=lambda x: x['frame_id'])
+                video_annots = []
+                for img in images_sorted:
+                    video_annots.extend(annots_by_image.get(img['id'], []))
+                anno = cls._build_video_annotation(video_id, images_sorted, video_annots)
+
+                split_idx = anno['split_frame_idx']
+                frame_trajectories = anno['frame_trajectories']
+
+                # Source frames from original PanAf
+                src_dir = join(cls.FRAME_HOME, "JPEGImages", video_id)
+                src_frames = sorted(glob(join(src_dir, "*.jpg")))
+                if not src_frames:
+                    log.warning(f"[{cls.DATASET_NAME}] No source frames for {video_id} at {src_dir}")
+                    continue
+
+                os.makedirs(output_dir, exist_ok=True)
+
+                for frame_idx, src_path in enumerate(src_frames):
+                    dst_path = join(output_dir, os.path.basename(src_path))
+
+                    if frame_idx < split_idx and frame_idx < len(frame_trajectories):
+                        # Draw GT points on this frame
+                        frame = cv2.imread(src_path)
+                        if frame is None:
+                            shutil.copy2(src_path, dst_path)
+                            continue
+                        for pt in frame_trajectories[frame_idx]['points']:
+                            x, y = int(pt['point'][0]), int(pt['point'][1])
+                            cv2.circle(frame, (x, y), cls.POINT_RADIUS,
+                                       cls.POINT_COLOR, thickness=-1)
+                            cv2.circle(frame, (x, y), cls.POINT_RADIUS,
+                                       (255, 255, 255), thickness=1)
+                        cv2.imwrite(dst_path, frame)
+                    else:
+                        # Copy unchanged
+                        shutil.copy2(src_path, dst_path)
+
+            log.info(f"[{cls.DATASET_NAME}] Prepared ICL frames for {len(images_by_video)} "
+                     f"videos ({data_split})")
+
+class PanAfGuided(PanAf):
+    """PanAf with detailed caption prepended to prompt."""
+    DATASET_NAME = "panaf_guided"
+    VIDEO_FPS = 18
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
+    TASKS = ['track']
+    SPLIT_MAP = {
+        "sample": "val_sample"
+    }
+    EXPRESSION = "ape"
+    CAPTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "captions.json")
+    _captions = None  # lazy-loaded cache
+
+    @classmethod
+    def _load_captions(cls):
+        if cls._captions is None:
+            with open(cls.CAPTIONS_PATH, 'r') as f:
+                cls._captions = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded {len(cls._captions)} captions")
+        return cls._captions
+
+    @classmethod
+    def _prepend_prompt(cls, video_id):
+        captions = cls._load_captions()
+        caption = captions.get(video_id)
+        if caption is None:
+            log.warning(f"[{cls.DATASET_NAME}] No caption for {video_id}")
+            return ""
+        return caption
+    
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        # Reuse PanAf's annotation builder, then add dataset-specific prepend field
+        result = PanAf._build_video_annotation.__func__(cls, video_id, images, annotations)
+        result['prepend'] = cls._prepend_prompt(video_id)
+        return result
+
+    def _create_message_list(self, ex):
+        message_list = super()._create_message_list(ex)
+        message_list[0]['prepend'] = ex.get('prepend')
+        return message_list
+
+
+class CFC(LocalTrackingDataset):
+    """
+    CFC-specific methods for extracting ground truth tracks and masks.
+    """
+
+    DATASET_NAME = "cfc"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
+    TASKS = ['track']
+    VIDEO_FPS = 24
+    SPLIT_MAP = {
+        "sample": "val_sample"
+    }
+    EXPRESSION = "fish"
+
+    def load(self):
+        coco = self._load_coco_json(self.data_split)
+
+        # Index images and annotations by video
+        image_by_id = {img['id']: img for img in coco['images']}
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['file_name'][:img['file_name'].rfind('_')], []).append(img)
+
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        # Build one example per video
+        data = []
+        for video_id, images in sorted(images_by_video.items()):
+            images = sorted(images, key=lambda x: x['file_name'][x['file_name'].rfind('_'):x['file_name'].rfind('.')])
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+            example = self._build_video_annotation(video_id, images, video_annots)
+            data.append(example)
+
+        self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} videos for split={self.data_split}")
+        return data
+
+    @classmethod
+    def _load_all_dataset_and_fps(cls, overwrite_cache=True):
+        video_fps = {}
+        for data_split in set(cls.SPLIT_MAP.values()):
+            coco = cls._load_coco_json(data_split)
+            video_ids = {img['file_name'][:img['file_name'].rfind("_")] 
+                         for img in coco['images']}
+            for vid in video_ids:
+                video_fps[(data_split, vid)] = cls.VIDEO_FPS
+        return video_fps
+
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        """Convert COCO images + annotations for one video into tracking format.
+
+        Args:
+            video_id: Video identifier string.
+            images: Sorted list of COCO image dicts for this video.
+            annotations: List of COCO annotation dicts for this video.
+        """
+        height = images[0]['height']
+        width = images[0]['width']
+        n_frames = len(images)
+
+        # Map image_id -> frame_idx (0-based)
+        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+        # Find unique track_ids and create stable anno_ids
+        fish_ids = sorted({ann['track_id'] for ann in annotations})
+        # anno_id: "{min_annotation_id:06d}_{fish_id}" for global uniqueness
+        min_ann_id = min(ann['id'] for ann in annotations) if annotations else 0
+        anno_id_map = {fish_id: f"{min_ann_id:06d}_{fish_id}" for fish_id in fish_ids}
+        anno_ids = [anno_id_map[a] for a in fish_ids]
+        # obj_id index: ape_id -> 0, 1, 2...
+        fish_id_to_obj = {fish_id: idx for idx, fish_id in enumerate(fish_ids)}
+
+        # Group annotations by (frame_idx, ape_id) -> bbox
+        bbox_lookup = {}
+        for ann in annotations:
+            frame_idx = image_id_to_frame.get(ann['image_id'])
+            if frame_idx is None:
+                continue
+            bbox_lookup[(frame_idx, ann['fish_id'])] = ann['bbox']
+
+        # Build frame_trajectories
+        frame_trajectories = []
+        for frame_idx in range(n_frames):
+            points = []
+            for fish_id in fish_ids:
+                bbox = bbox_lookup.get((frame_idx, fish_id))
+                if bbox is None:
+                    continue
+                x, y, w, h = bbox
+                points.append({
+                    "id": fish_id_to_obj[fish_id],
+                    "point": [x + w / 2, y + h / 2],
+                    "occluded": False,
+                })
+            frame_trajectories.append({
+                "frame": frame_idx,
+                "time": frame_idx / cls.VIDEO_FPS,
+                "points": points,
+            })
+
+        return {
+            "id": video_id,
+            "video": video_id,
+            "expression": cls.EXPRESSION,
+            "height": height,
+            "width": width,
+            "fps": cls.VIDEO_FPS,
+            "sampling_fps": cls.VIDEO_FPS,
+            "mask_id": [str(i) for i in range(len(fish_ids))],
+            "obj_id": [str(i) for i in range(len(fish_ids))],
+            "anno_id": anno_ids,
+            "qid": video_id,
+            "frame_trajectories": frame_trajectories,
         }
+    
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """Convert bbox annotations to RLE masks and save per-video JSON.
 
-        if self.use_fps_sampling:
-            metadata['sampler_overrides'] = {
-                'frame_sample_mode': 'fps',
-                'candidate_sampling_fps': self._get_candidate_fps(
-                    ex.get('fps', self.VIDEO_FPS)),
-                'min_fps': ex['sampling_fps'],
-            }
+        Saves to: VIDEO_HOME/MasksRLE/{video_id}.json
+        Format: {mask_idx: [rle_or_none_per_frame, ...], ...}
+        """
+        coco = cls._load_coco_json(data_split)
+        image_by_id = {img['id']: img for img in coco['images']}
 
-        item = {
-            'video': video_path,
-            'message_list': message_list,
-            'sampling_fps': ex['sampling_fps'],
-            'metadata': metadata,
-        }
+        # Group images and annotations by video
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['video_id'], []).append(img)
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
 
-        if self.is_eval:
-            masks_path = join(self.VIDEO_HOME, "MasksRLE", f"{ex['video']}.json")
-            if exists(masks_path):
-                with open(masks_path, 'r') as f:
-                    masks = json.load(f)
-                item['metadata']['masks'] = masks
-                item['metadata']['mask_id'] = ex['mask_id']
-                if "points" in item['message_list'][0]:
-                    item['metadata']['points'] = item['message_list'][0]['points']
+        output_dir = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_dir, exist_ok=True)
 
-        return item
+        n_encoded = 0
+        n_skipped = 0
+        for video_id, images in tqdm(sorted(images_by_video.items()),
+                                     desc=f"Encoding GT masks ({data_split})"):
+            output_path = join(output_dir, f"{video_id}.json")
+            if exists(output_path):
+                n_skipped += 1
+                continue
+
+            images = sorted(images, key=lambda x: x['frame_id'])
+            height, width = images[0]['height'], images[0]['width']
+            n_frames = len(images)
+            image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+            # Collect all annotations for this video
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+            fish_ids = sorted({ann['track_id'] for ann in video_annots})
+
+            # Group by (frame_idx, ape_id) -> bbox
+            bbox_lookup = {}
+            for ann in video_annots:
+                frame_idx = image_id_to_frame.get(ann['image_id'])
+                if frame_idx is not None:
+                    bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
+
+            # Build mask_annot: {mask_idx: [rle_or_none per frame]}
+            mask_annot = {}
+            for obj_idx, fish_id in enumerate(fish_ids):
+                frame_masks = []
+                for frame_idx in range(n_frames):
+                    bbox = bbox_lookup.get((frame_idx, fish_id))
+                    if bbox is None:
+                        frame_masks.append(None)
+                    else:
+                        frame_masks.append(cls._bbox_to_rle(bbox, height, width))
+                mask_annot[obj_idx] = frame_masks
+
+            with open(output_path, 'w') as f:
+                json.dump(mask_annot, f)
+            n_encoded += 1
+
+        log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
+                 f"{n_encoded} new, {n_skipped} already exist, "
+                 f"out of {len(images_by_video)} videos.")
+
 
 
 class Mevis(TrackingDataset):
@@ -976,6 +1354,191 @@ class Mevis(TrackingDataset):
                 if "points" in item['message_list'][0]:
                     item['metadata']['points'] = item['message_list'][0]['points']
         return item
+
+
+class MevisCaption(Mevis):
+    """MeViS Caption set: ONLY used to generate videos with ground-truth annotations.
+
+    Creates one video per annotated object, with a blue point tracking that
+    object throughout. For downstream captioning inference via vLLM.
+    """
+    HF_SOURCE = "allenai/molmo2-mevis"
+    DATASET_NAME = "mevis_caption"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "MeViS")
+    VIDEO_FPS = 6
+    TASKS = []
+    SPLIT_MAP = {
+        "train": "train",
+        "validation": "valid_u",
+        "test": "valid_u",
+    }
+    MEVIS_DIR = join(VIDEO_TRACK_DATA_HOME, "MeViS", "MeViS_release")
+    POINT_COLOR = (255, 0, 0)   # blue in BGR
+    POINT_RADIUS = 5
+
+    @classmethod
+    def _postprocess_data(cls, splits=None):
+        """Load HF track annotations, restructure into per-object trajectories.
+
+        Returns:
+            {(data_split, video_name): [
+                {"name": "{video}_{anno}", "trajectory": [
+                    {"frame": 42, "point": [x, y]}, ...]},
+                ...
+            ]}
+        """
+        task = "track"
+        if splits is None:
+            splits = list(set(cls.SPLIT_MAP.values()))
+
+        data = {}
+        for data_split in splits:
+            local_dir = cls._get_local_dir(task, data_split)
+            config = cls._get_hf_config(task)
+            try:
+                ds = _load_hf_dataset(cls.HF_SOURCE, data_split, local_name=local_dir,
+                                      config=config, overwrite_cache=False)
+                ds = ds.select_columns(["video", "frame_trajectories", "anno_id"])
+            except Exception as e:
+                log.warning(f"Could not load {cls.HF_SOURCE}/{config}/{data_split}: {e}")
+                continue
+
+            # Group rows by video
+            video_to_rows = {}
+            for row in ds:
+                vname = os.path.splitext(row["video"])[0]
+                video_to_rows.setdefault(vname, []).append(row)
+
+            for video_name, rows in video_to_rows.items():
+                # Collect unique anno_ids across all rows for this video
+                unique_annos = set()
+                for row in rows:
+                    unique_annos.update(row["anno_id"])
+
+                video_data = []
+                for anno in sorted(unique_annos):
+                    anno_trajectory = []
+                    for row in rows:
+                        if anno not in row["anno_id"]:
+                            continue
+                        obj_id = row["anno_id"].index(anno)
+                        for frame_dict in row["frame_trajectories"]:
+                            frame_point = None
+                            for point in frame_dict["points"]:
+                                if int(point["id"]) == obj_id:
+                                    frame_point = point
+                                    break
+                            if frame_point is None:
+                                continue
+                            anno_trajectory.append({
+                                "frame": frame_dict["frame"],
+                                "point": frame_point["point"],
+                            })
+                        # One row's trajectory is sufficient for this anno
+                        break
+                    if anno_trajectory:
+                        video_data.append({
+                            "name": f"{video_name}_{anno}",
+                            "trajectory": anno_trajectory,
+                        })
+                if video_data:
+                    data[(data_split, video_name)] = video_data
+
+        log.info(f"[{cls.DATASET_NAME}] Postprocessed {len(data)} videos, "
+                 f"{sum(len(v) for v in data.values())} total annotation tracks")
+        return data
+
+    @classmethod
+    def _draw_annotated_frames(cls, data, output_base=None):
+        """Draw blue dots on frames for each per-object annotation.
+
+        Creates one annotated frame directory per annotation:
+            {output_base}/{data_split}/AnnotatedFrames/{video}_{anno}/
+
+        Args:
+            data: Output of _postprocess_data().
+            output_base: Root for annotated output. Defaults to cls.MEVIS_DIR.
+        """
+        import shutil
+
+        if output_base is None:
+            output_base = cls.MEVIS_DIR
+
+        total_created = 0
+        for (data_split, video_name), entries in tqdm(data.items(), desc="Drawing annotated frames"):
+            src_frames_dir = join(cls.MEVIS_DIR, data_split, "JPEGImages", video_name)
+            if not exists(src_frames_dir):
+                log.warning(f"[{cls.DATASET_NAME}] Source frames missing: {src_frames_dir}")
+                continue
+
+            all_frames = get_image_files(src_frames_dir)
+            # Build frame index -> filename mapping
+            frame_idx_to_path = {}
+            for fpath in all_frames:
+                basename = os.path.splitext(os.path.basename(fpath))[0]
+                frame_idx_to_path[int(basename)] = fpath
+
+            for entry in entries:
+                anno_name = entry["name"]
+                out_dir = join(output_base, data_split, "AnnotatedFrames", anno_name)
+                if exists(out_dir) and len(os.listdir(out_dir)) == len(all_frames):
+                    continue  # already done
+
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Build lookup: frame_idx -> (x, y)
+                point_lookup = {}
+                for traj in entry["trajectory"]:
+                    point_lookup[traj["frame"]] = (
+                        int(traj["point"][0]),
+                        int(traj["point"][1]),
+                    )
+
+                for frame_idx, src_path in sorted(frame_idx_to_path.items()):
+                    dst_path = join(out_dir, os.path.basename(src_path))
+                    if frame_idx in point_lookup:
+                        frame = cv2.imread(src_path)
+                        x, y = point_lookup[frame_idx]
+                        cv2.circle(frame, (x, y), cls.POINT_RADIUS,
+                                   cls.POINT_COLOR, thickness=-1)
+                        cv2.circle(frame, (x, y), cls.POINT_RADIUS,
+                                   (255, 255, 255), thickness=1)
+                        cv2.imwrite(dst_path, frame)
+                    else:
+                        shutil.copy2(src_path, dst_path)
+
+                total_created += 1
+
+        log.info(f"[{cls.DATASET_NAME}] Created {total_created} annotated frame directories")
+
+    @classmethod
+    def download_annotated(cls, n_procs=8):
+        """Download pipeline for annotated videos."""
+        # Step 1: Postprocess HF annotations into per-object trajectories
+        data = cls._postprocess_data()
+
+        # Step 2: Ensure raw frames exist (uses Mevis's download logic)
+        cls._prepare_annotation_dir(n_procs)
+
+        # Step 3: Draw annotated frames
+        cls._draw_annotated_frames(data)
+
+        # Step 4: Build work items for annotated videos and encode
+        work_items = []
+        for (data_split, video_name), entries in data.items():
+            for entry in entries:
+                anno_name = entry["name"]
+                frames_dir = join(cls.MEVIS_DIR, data_split, "AnnotatedFrames", anno_name)
+                output_path = join(cls.MEVIS_DIR, data_split, "annotated_videos", f"{anno_name}.mp4")
+                if not exists(output_path) and exists(frames_dir):
+                    work_items.append({
+                        "frames_dir": frames_dir,
+                        "output_path": output_path,
+                        "fps": cls.VIDEO_FPS,
+                    })
+
+        cls._create_videos(work_items, n_procs)
+        log.info(f"[{cls.DATASET_NAME}] Annotated video pipeline complete.")
 
 class MevisChallenge(Mevis):
     """MeViS Challenge set: MeViS valid split (no GT annotations).
