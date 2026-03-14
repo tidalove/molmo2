@@ -18,7 +18,7 @@ from olmo.data.academic_video_datasets import (
 )
 from olmo.data.academic_video_track_datasets import (
     PanAf, PanAfICL, PanAfGuided, CFC,
-    Mevis, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
+    Mevis, MevisCaption, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
     LVVIS, YTVIS, ViCaS, ReVOS, MoCA,
     LVOSv1, LVOSv2, LaSOT, UWCOT, WebUOT, LaTOT, TNL2K, TNLLT,
     WebUAV, GOT10k, VastTrack, TrackingNet
@@ -396,6 +396,10 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         return Mevis(split=split, task="single_point_track")
     if dataset_name == "mevis_track_eval_1fps": # Used for eval
         return Mevis(split=split, task="track", sampling_fps=1)
+    if dataset_name == "mevis_caption":
+        return MevisCaption(split=split)
+    if dataset_name == "mevis_caption_mask":
+        return MevisCaption(split=split, video_mode="gt_mask")
     if dataset_name == "mevis_valid_track_eval_1fps": # Used for codalab submission
         return MevisChallenge(task="track", sampling_fps=1)
     # ref_yt_vos: track

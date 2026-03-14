@@ -538,6 +538,8 @@ class TrackingDataset(Dataset):
             'message_list': message_list,
             'sampling_fps': ex['sampling_fps'],
             'metadata': metadata,
+            'fps': str(ex['sampling_fps']),
+            'label': ex['expression']
         }
 
     def get_by_example_id(self, example_id):
@@ -1226,7 +1228,14 @@ class CFC(LocalTrackingDataset):
                  f"{n_encoded} new, {n_skipped} already exist, "
                  f"out of {len(images_by_video)} videos.")
 
-
+class SAFARI(LocalTrackingDataset):
+    DATASET_NAME = "safari"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "SA-FARI")
+    VIDEO_FPS = 6
+    TASKS = ["track"]
+    SPLIT_MAP = {
+        "sample": "val_sample"
+    }
 
 class Mevis(TrackingDataset):
     """MeViS: https://github.com/henghuiding/MeViS"""
@@ -1384,6 +1393,76 @@ class MevisCaption(Mevis):
     MEVIS_DIR = join(VIDEO_TRACK_DATA_HOME, "MeViS", "MeViS_release")
     POINT_COLOR = (255, 0, 0)   # blue in BGR
     POINT_RADIUS = 5
+
+    CAPTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "descriptions.json")
+    _captions = None
+
+
+    def __init__(self, split="valid_u", video_mode="annotated", **kwargs):
+        """Lightweight init for captioning inference — no task/HF loading needed.
+
+        Args:
+            video_mode: "annotated" (blue dot on full video) or "gt_mask"
+                (black silhouette on white background).
+        """
+        self.split = split
+        self.data_split = self.SPLIT_MAP.get(split, split)
+        self.is_eval = True
+        self.task = "caption"
+        self.video_mode = video_mode
+        if video_mode == "gt_mask":
+            self.video_dir = join(self.VIDEO_HOME, self.data_split, "gt_mask_videos")
+        else:
+            self.video_dir = join(self.VIDEO_HOME, self.data_split, "annotated_videos")
+        self.data = self._load_caption_data()
+
+    def _load_caption_data(self):
+        """Build data entries from annotated videos + descriptions.json."""
+        captions = self._load_captions()
+        videos = sorted(glob(join(self.video_dir, "*.mp4")))
+        data = []
+        for v in videos:
+            video_id = os.path.splitext(os.path.basename(v))[0]
+            caption = captions.get(video_id, {})
+            data.append({
+                'id': video_id,
+                'video': video_id,
+                'question': self._build_prompt(video_id, video_mode=self.video_mode),
+                'expression': caption.get('target_desc', ''),
+                'width': 0,
+                'height': 0,
+                'sampling_fps': self.VIDEO_FPS,
+            })
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} caption examples")
+        return data
+
+    def get(self, idx, rng):
+        ex = self.data[idx]
+        video_path = join(self.video_dir, ex['video'] + '.mp4')
+        message_list = [{
+            'style': 'plain',
+            'question': ex['question'],
+            'label': ex['expression'],
+            'sampling_fps': ex['sampling_fps'],
+            'width': ex['width'],
+            'height': ex['height'],
+        }]
+        return {
+            'video': video_path,
+            'message_list': message_list,
+            'sampling_fps': ex['sampling_fps'],
+            'metadata': {
+                'example_id': ex['id'],
+                'task': self.task,
+                'video': ex['video'],
+            },
+        }
+
+    def __len__(self):
+        return len(self.data)
+
+    def _get_style(self):
+        return "plain"
 
     @classmethod
     def _postprocess_data(cls, splits=None):
@@ -1548,6 +1627,148 @@ class MevisCaption(Mevis):
 
         cls._create_videos(work_items, n_procs)
         log.info(f"[{cls.DATASET_NAME}] Annotated video pipeline complete.")
+
+    @classmethod
+    def _draw_gt_mask_frames(cls, data, output_base=None):
+        """Render GT masks as black silhouettes on white background.
+
+        Creates one frame directory per annotation:
+            {output_base}/{data_split}/GTMaskFrames/{video}_{anno}/
+
+        Uses mask_dict.json (keyed by anno_id string) from MeViS_release.
+        Each anno_id maps to a list of COCO RLE masks, one per JPEG frame.
+        None entries mean the object is absent → rendered as blank white.
+        """
+        import pycocotools.mask as mask_util
+
+        if output_base is None:
+            output_base = cls.MEVIS_DIR
+
+        mask_dicts = {}  # per-split cache
+
+        total_created = 0
+        for (data_split, video_name), entries in tqdm(data.items(), desc="Drawing GT mask frames"):
+            if data_split not in mask_dicts:
+                path = join(cls.MEVIS_DIR, data_split, "mask_dict.json")
+                with open(path) as f:
+                    mask_dicts[data_split] = json.load(f)
+            mask_dict = mask_dicts[data_split]
+
+            src_frames_dir = join(cls.MEVIS_DIR, data_split, "JPEGImages", video_name)
+            if not exists(src_frames_dir):
+                log.warning(f"[{cls.DATASET_NAME}] Source frames missing: {src_frames_dir}")
+                continue
+            all_frames = get_image_files(src_frames_dir)
+
+            for entry in entries:
+                anno_name = entry["name"]  # "{video}_{anno}"
+                anno_id = anno_name.split("_")[-1]
+
+                out_dir = join(output_base, data_split, "GTMaskFrames", anno_name)
+                if exists(out_dir) and len(os.listdir(out_dir)) == len(all_frames):
+                    continue
+
+                masks = mask_dict.get(anno_id, [])
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Cache dimensions from first valid mask or first source frame
+                cached_hw = None
+
+                for frame_idx, src_path in enumerate(all_frames):
+                    dst_path = join(out_dir, os.path.basename(src_path))
+                    rle = masks[frame_idx] if frame_idx < len(masks) else None
+
+                    if rle is not None:
+                        binary = mask_util.decode(rle)  # (H, W), uint8 0/1
+                        cached_hw = binary.shape[:2]
+                        frame = np.full_like(binary, 255, dtype=np.uint8)
+                        frame[binary == 1] = 0
+                        cv2.imwrite(dst_path, frame)
+                    else:
+                        if cached_hw is None:
+                            src = cv2.imread(src_path)
+                            cached_hw = src.shape[:2]
+                        h, w = cached_hw
+                        frame = np.full((h, w), 255, dtype=np.uint8)
+                        cv2.imwrite(dst_path, frame)
+
+                total_created += 1
+
+        log.info(f"[{cls.DATASET_NAME}] Created {total_created} GT mask frame directories")
+
+    @classmethod
+    def download_gt_masks(cls, n_procs=8, splits=None):
+        """Generate GT mask silhouette videos (black object on white background).
+
+        Args:
+            splits: List of splits to process (e.g. ["valid_u"]). Defaults to all.
+        """
+        data = cls._postprocess_data(splits=splits)
+        cls._prepare_annotation_dir(n_procs)  # ensure raw JPEGs exist (for dimensions)
+        cls._draw_gt_mask_frames(data)
+
+        work_items = []
+        for (data_split, video_name), entries in data.items():
+            for entry in entries:
+                anno_name = entry["name"]
+                frames_dir = join(cls.MEVIS_DIR, data_split, "GTMaskFrames", anno_name)
+                output_dir = join(cls.VIDEO_HOME, data_split, "gt_mask_videos")
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = join(output_dir, f"{anno_name}.mp4")
+                if not exists(output_path) and exists(frames_dir):
+                    work_items.append({
+                        "frames_dir": frames_dir,
+                        "output_path": output_path,
+                        "fps": cls.VIDEO_FPS,
+                    })
+
+        cls._create_videos(work_items, n_procs)
+        log.info(f"[{cls.DATASET_NAME}] GT mask video pipeline complete.")
+
+    @classmethod
+    def _load_captions(cls):
+        if cls._captions is None:
+            with open(cls.CAPTIONS_PATH, 'r') as f:
+                cls._captions = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded {len(cls._captions)} captions")
+        return cls._captions
+
+    @classmethod
+    def _build_prompt(cls, video_id, video_mode="annotated"):
+        captions = cls._load_captions()
+        caption = captions.get(video_id)
+        if caption is None:
+            log.warning(f"[{cls.DATASET_NAME}] No caption for {video_id}")
+            return ""
+        noun_phrase = caption.get("noun_phrase")
+        target_desc = caption.get("target_desc")
+        if video_mode == "gt_mask":
+            prompt = [
+                f"This video shows the silhouette of a {target_desc} as a black shape on a white background.",
+                f"Describe the {noun_phrase}'s size, motion, and location over time. Do not point.",
+                "Where is it located in the frame? Is it traveling on a trajectory or mostly stationary?",
+                "If it's traveling, what direction is it going?",
+            ]
+        else:
+            prompt = [
+                f"Do not point. There is a blue dot on the {target_desc}.",
+                f"Write a long description of the blue-dotted {noun_phrase}'s motion and behavior over time.",
+                "Where is it located in the frame, and relative to any other objects? Is it moving or stationary?",
+                "If it's moving, what direction is it going?",
+            ]
+        return " ".join(prompt)
+    
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        # Reuse PanAf's annotation builder, then add dataset-specific prepend field
+        result = PanAf._build_video_annotation.__func__(cls, video_id, images, annotations)
+        result['question'] = cls._build_prompt(video_id)
+        return result
+
+    def _create_message_list(self, ex):
+        message_list = super()._create_message_list(ex)
+        message_list[0]['question'] = ex.get('question')
+        return message_list
 
 class MevisChallenge(Mevis):
     """MeViS Challenge set: MeViS valid split (no GT annotations).

@@ -105,6 +105,12 @@ def build_examples(args, dataset=None):
 
     if args.max_examples:
         examples = examples[:args.max_examples]
+
+    # Shard: interleaved slicing for balanced load
+    if args.num_shards is not None:
+        examples = examples[args.shard_index::args.num_shards]
+        log.info(f"Shard {args.shard_index}/{args.num_shards}: {len(examples)} examples")
+
     return examples
 
 
@@ -190,6 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     parser.add_argument("--use_float32", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip already-processed examples")
+    parser.add_argument("--shard_index", type=int, default=None, help="Shard index for parallel eval")
+    parser.add_argument("--num_shards", type=int, default=None, help="Total number of shards for parallel eval")
     args = parser.parse_args()
 
     # Validate input modes
@@ -197,6 +205,8 @@ if __name__ == "__main__":
         parser.error("Provide exactly one of --video_dir or --task")
     if args.video_dir and not (args.style or args.prompt):
         parser.error("--video_dir mode requires --style or --prompt")
+    if (args.shard_index is None) != (args.num_shards is None):
+        parser.error("--shard_index and --num_shards must be used together")
 
     prepare_cli_environment()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -235,7 +245,10 @@ if __name__ == "__main__":
     log.info(f"Total examples: {len(examples)}")
 
     # Resume: load existing predictions and filter
-    output_path = os.path.join(args.save_dir, "predictions.json")
+    if args.num_shards is not None:
+        output_path = os.path.join(args.save_dir, f"predictions_shard{args.shard_index}.json")
+    else:
+        output_path = os.path.join(args.save_dir, "predictions.json")
     existing_predictions = []
     done_ids = set()
     if args.resume and os.path.exists(output_path):
