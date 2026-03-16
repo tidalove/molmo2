@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import os
 
 import torchmetrics
 
@@ -13,8 +14,8 @@ from olmo.eval.evaluators import SavePredictions
 log = logging.getLogger(__name__)
 
 
-def run_eval(predictions_path, task, split="test"):
-    """Run evaluation on a predictions file. Returns resolved metrics dict."""
+def run_eval(predictions_path, task, split="test", overwrite=False):
+    """Run evaluation on a predictions file. Returns and writes resolved metrics dict."""
 
     # 1. Load predictions
     with open(predictions_path) as f:
@@ -86,6 +87,14 @@ def run_eval(predictions_path, task, split="test"):
     # 8. Log to console
     log_metrics_to_console(task, resolved_metrics)
 
+    # 9. Overwrite existing metrics.json
+    metrics_path = predictions_path[:predictions_path.rfind('/')] + "/metrics.json"
+    if (not os.path.exists(metrics_path)) or overwrite:
+        with open(metrics_path, 'w') as f:
+            json.dump(resolved_metrics, f)
+    else:
+        log.info(f"Metrics file {metrics_path} already exists, skipping overwrite")
+
     return resolved_metrics
 
 
@@ -94,9 +103,10 @@ if __name__ == "__main__":
     parser.add_argument("--predictions", required=True, help="Path to predictions.json")
     parser.add_argument("--task", required=True, help="Task name (e.g. mevis_point_track_per_frame_fps_6_sample_fps_1)")
     parser.add_argument("--split", default="test", help="Dataset split (default: test)")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing metrics.json if it exists")
     args = parser.parse_args()
 
     prepare_cli_environment()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    run_eval(args.predictions, args.task, args.split)
+    run_eval(args.predictions, args.task, args.split, args.overwrite)
