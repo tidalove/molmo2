@@ -13,7 +13,7 @@ os.environ["VLLM_VIDEO_LOADER_BACKEND"] = "molmo2"
 import numpy as np
 import torch
 
-from olmo.util import prepare_cli_environment
+from olmo.util import prepare_cli_environment, log_metrics_to_console
 from olmo.preprocessing.data_formatter import GENERAL_PROMPTS_V1, apply_keyword_prompt
 from olmo.data.get_dataset import get_dataset_by_name
 
@@ -195,6 +195,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=2048, help="Max generation tokens")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     parser.add_argument("--use_float32", action="store_true")
+    parser.add_argument("--eval", action="store_true", help="Run evaluation after inference")
     parser.add_argument("--resume", action="store_true", help="Skip already-processed examples")
     parser.add_argument("--shard_index", type=int, default=None, help="Shard index for parallel eval")
     parser.add_argument("--num_shards", type=int, default=None, help="Total number of shards for parallel eval")
@@ -304,3 +305,11 @@ if __name__ == "__main__":
         log.info(f"Saved {len(all_predictions)} predictions to {output_path}")
 
     log.info(f"Done. Total predictions: {len(all_predictions)}")
+
+    # Run evaluation if requested
+    if args.eval:
+        if not args.task:
+            log.warning("--eval requires --task, skipping evaluation")
+        else:
+            from scripts.run_standalone_eval import run_eval
+            metrics = run_eval(output_path, args.task, args.split)
