@@ -701,6 +701,8 @@ class LocalTrackingDataset(TrackingDataset):
             'message_list': message_list,
             'sampling_fps': ex['sampling_fps'],
             'metadata': metadata,
+            'fps': str(ex['sampling_fps']),
+            'label': ex['expression']
         }
 
         if self.is_eval:
