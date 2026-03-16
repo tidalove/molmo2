@@ -2258,6 +2258,10 @@ class VideoObjectTrackingEval(Evaluator):
             scores["recall"].append(video_metrics['recall'])
             scores["f1"].append(video_metrics['f1'])
 
+            scores["coco_precision"].append(video_metrics['coco_precision'])
+            scores["coco_recall"].append(video_metrics['coco_recall'])
+            scores["coco_f1"].append(video_metrics['coco_f1'])
+
             # hota metrics
             scores['DetA'].append(video_metrics['DetA'])
             scores['AssA'].append(video_metrics['AssA'])
@@ -2269,6 +2273,9 @@ class VideoObjectTrackingEval(Evaluator):
                 scores[f'precision_{category}'].append(video_metrics['precision'])
                 scores[f'recall_{category}'].append(video_metrics['recall'])
                 scores[f'f1_{category}'].append(video_metrics['f1'])
+                scores[f'coco_precision_{category}'].append(video_metrics['coco_precision'])
+                scores[f'coco_recall_{category}'].append(video_metrics['coco_recall'])
+                scores[f'coco_f1_{category}'].append(video_metrics['coco_f1'])
                 scores[f'DetA_{category}'].append(video_metrics['DetA'])
                 scores[f'AssA_{category}'].append(video_metrics['AssA'])
                 scores[f'HOTA_{category}'].append(video_metrics['HOTA'])

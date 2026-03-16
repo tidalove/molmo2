@@ -23,7 +23,7 @@ def run_eval(predictions_path, task, split="test"):
 
     # 2. Get evaluator config and build evaluators
     evaluator_config = get_evaluator(task)
-    inf_evaluator = evaluator_config.build(save_dir=None)
+    inf_evaluator = evaluator_config.build(default_save_dir=None)
 
     # Filter out SavePredictions — we only want real evaluators
     evaluators = [m for m in inf_evaluator.metrics if not isinstance(m, SavePredictions)]

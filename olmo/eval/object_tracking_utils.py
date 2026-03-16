@@ -1073,6 +1073,10 @@ def evaluate_video_object_tracking(
         'precision': spatial_metrics['precision'],
         'recall': spatial_metrics['recall'],
         'f1': spatial_metrics['f1'],
+
+        'coco_precision': spatial_metrics['coco_precision'],
+        'coco_recall': spatial_metrics['coco_recall'],
+        'coco_f1': spatial_metrics['coco_f1'],
         
         # HOTA tracking metrics (ID consistency)
         'HOTA': float(hota_results['HOTA'][alpha_05_idx]),
