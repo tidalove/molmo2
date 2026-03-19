@@ -2,6 +2,7 @@ import argparse
 import dataclasses
 from dataclasses import asdict
 from os.path import join
+import os
 from typing import List
 import numpy as np
 from omegaconf import OmegaConf, omegaconf
@@ -170,6 +171,11 @@ TRACKING_MIXTURE = [
     ], 0.1],
 ]
 
+INDIVIDUAL_DATASETS = {
+    "cfc_track": "tracking",
+    "panaf_track": "tracking"
+}
+
 
 def get_model(checkpoint, model):
     model_cfg = MolmoConfig.load(join(checkpoint, "config.yaml"), key="model")
@@ -205,6 +211,7 @@ def get_model(checkpoint, model):
     model_cfg.vision_backbone.pooling_attention_mask = True
     model_cfg.data_formatter.pointing_format = "html-v2"
     model_cfg.mm_preprocessor.video.max_subtitle_tokens = None
+    model_cfg.mm_preprocessor.last_message_loss_only = True
     model_cfg.data_formatter.p_multi_point_all_image = 0.5
     model_cfg.data_formatter.p_choice_content_in_mc = 1.0
 
@@ -302,6 +309,8 @@ def get_training_mixture(name):
             ["nlp", ["tulu4"], 0.1 - hardcode_weight],
             ["hardcodes", ["molmo2_hardcodes"], hardcode_weight]
         ]
+    elif name in INDIVIDUAL_DATASETS:
+        training_mixture = [[INDIVIDUAL_DATASETS[name], [name], 1.0]]
     else:
         raise NotImplementedError(name)
     root_size_mixture: List[KwargsMixture] = []
@@ -314,6 +323,8 @@ def get_training_mixture(name):
 def main():
     prepare_torchrun_environment()
 
+    wandb = os.environ.get("WANDB_PROJECT")
+
     parser = argparse.ArgumentParser(prog="Train a multitask model")
     parser.add_argument("checkpoint", help="Path to checkpoint to start from")
     parser.add_argument("mixture", default="0.0.1")
@@ -324,8 +335,15 @@ def main():
     parser.add_argument("--max_loss_examples", default=2048, type=int)
     parser.add_argument("--max_inf_eval_examples", default=1280, type=int)
     parser.add_argument("--prefetch_factor", default=4, type=int)
-    parser.add_argument("--num_workers", default=6, type=int)
+    parser.add_argument("--num_workers", default=16, type=int)
     parser.add_argument("--cp_degree", default=1, type=int)
+    parser.add_argument("--name", default="multitask_train", type=str)
+    parser.add_argument("--save_folder", type=str)
+    parser.add_argument("--lora", action="store_true")
+    parser.add_argument("--lora_rank", type=int, default=16)
+    parser.add_argument("--ft_vit", action="store_true")
+    parser.add_argument("--ft_llm", action="store_true")
+    parser.add_argument("--ft_connector", action="store_true")
     args, other_args = parser.parse_known_args()
 
     if args.mixture == "debug":
@@ -342,7 +360,7 @@ def main():
         eval_tasks = [
             "chart_qa", "info_qa", "coco_2014_vqa_multi", "pointing_eval_v2:test"
         ]
-    else:
+    elif args.mixture == "molmo2":
         loss_eval_tasks = ["llava_video_oe_academic", "pixmo_ask_model_anything", "pixmo_cap"]
         eval_tasks = [
             "chart_qa", "info_qa", "coco_2014_vqa_multi",
@@ -352,6 +370,9 @@ def main():
             "mvbench",
             "vixmo_points_count:val"
         ]
+    else:
+        loss_eval_tasks = []
+        eval_tasks = []
 
     training_mixture = get_training_mixture(args.mixture)
     seq_len = args.seq_len
@@ -376,6 +397,9 @@ def main():
         vit.image_num_layers = 2
         args.num_workers = 2
         args.prefetch_factor = 2
+
+    model_cfg.llm.lora = args.lora
+    model_cfg.llm.lora_rank = args.lora_rank
 
     num_workers = args.num_workers
     evaluations = []
@@ -411,12 +435,12 @@ def main():
 
     log_interval = 1 if args.debug else 20
     cfg = TrainConfig(
-        run_name="multitask_train",
-        save_folder=omegaconf.MISSING,
+        run_name=args.name,
+        save_folder=args.save_folder,
         seed=6198,
         dry_run=False,
 
-        wandb=None if args.debug else WandbConfig(
+        wandb=None if (args.debug or (wandb is None)) else WandbConfig(
             name="${run_name}",
             project="${oc.env:WANDB_PROJECT}",
             group=None,
@@ -445,9 +469,9 @@ def main():
             packing=PackingConfig(buffer_size=48, image_weight=30, shortcut_max_len_images=False,
                                   cp_world_size=args.cp_degree)
         ),
-        ft_connector=True,
-        ft_llm=not args.debug,
-        ft_vit=not args.debug,
+        ft_connector=args.ft_connector,
+        ft_llm=args.ft_llm,
+        ft_vit=args.ft_vit,
         optimizer=OptimizerConfig(
             name=OptimizerType.adamw,
             connector_learning_rate=5e-6,
@@ -467,12 +491,12 @@ def main():
         fsdp=FSDPConfig(fsdp2=True),
         load_path=None,
         initial_model_checkpoint=checkpoint,
-        save_interval=2000,
-        save_num_checkpoints_to_keep=1,
+        save_interval=20,
+        save_num_checkpoints_to_keep=5,
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
-        max_duration=300000,
+        max_duration=100,
         stop_at="${max_duration}",
         max_grad_norm=1,
         batch_divisor=BatchDivisor.global_batch,
@@ -486,8 +510,8 @@ def main():
         evaluators=loss_evaluations,
         inf_eval_interval=-1,
         eval_interval=-1,
-        save_final_unsharded_checkpoint=False,
-        save_final_optim=False,
+        save_final_unsharded_checkpoint=True,
+        save_final_optim=True,
         response_logits_only=True,
     )
 

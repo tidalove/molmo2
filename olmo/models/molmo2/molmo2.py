@@ -350,13 +350,25 @@ class Molmo2(ModelBase):
             return self.vision_backbone.image_vit.parameters()
 
     def get_llm_parameters(self) -> Iterator[torch.Tensor]:
+        lora_params = set(self.get_lora_parameters())
         if self.config.llm.additional_vocab_size:
             return (
-                param for param in self.transformer.parameters() if
-                param is not self.transformer.wte.new_embedding
+                param for param in self.transformer.parameters()
+                if param is not self.transformer.wte.new_embedding
+                and param not in lora_params
             )
         else:
-            return self.llm.parameters()
+            return (
+                param for param in self.transformer.parameters()
+                if param not in lora_params
+            )
+        
+    def get_lora_parameters(self) -> Iterator[torch.Tensor]:
+        from olmo.nn.llm import LoRALinear
+        for module in self.transformer.modules():
+            if isinstance(module, LoRALinear):
+                yield module.A
+                yield module.B
 
     def get_non_weight_decay_params(self) -> Iterator[torch.Tensor]:
         exclude_list = {
