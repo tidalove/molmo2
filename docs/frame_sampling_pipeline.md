@@ -1,242 +1,312 @@
-# Frame Sampling Pipeline for Video Tracking Eval
+# Frame Sampling Pipeline for LocalTrackingDataset
 
-How video frames get sampled, loaded, and selected when running tracking evaluation tasks like `cfc_track_eval_1fps` or `mevis_track_eval_1fps`.
+How video frames get loaded, filtered, and turned into prompts for tracking tasks (CFC, PanAf, etc.). Covers train vs eval, what the model sees vs what it predicts on, and how `max_frames`, `max_fps`, and `sampling_fps` interact.
 
 ## TL;DR
 
-1. **Encode** — Offline: raw frames are converted to an `.mp4` at the dataset's native `VIDEO_FPS` (`encode_frames_to_video`, `academic_video_track_datasets.py:118-178`).
-2. **Sample** — At load time: a `TimeSampler` (configured via `sampler_overrides` from the dataset) decides which timestamps to decode from the `.mp4` (`video_loader.py:126-182`).
-3. **Filter** — In the formatter: annotation point-tracks are aligned to the actually-loaded timestamps (`_filter_frames_to_video`), then downsampled to the target `sampling_fps` (`_sample_at_fps`) (`data_formatter.py:1366-1417`).
-4. **Predict** — The model sees one image-patch block per loaded frame, prefixed with a compact timestamp (e.g. `"0.0"`, `"0.5"`), and outputs point predictions only for the frames that survived filtering (`video_preprocessor.py:183-205`).
+There are **three distinct fps concepts** in the pipeline:
+
+1. **`VIDEO_FPS`** — the native fps of the encoded `.mp4` (e.g. CFC=24, PanAf=18). Set offline, never changes at runtime.
+2. **Loaded fps (`target_fps`)** — how many frames the model actually *sees*. Determined at load time by `TimeSampler` based on `candidate_sampling_fps`, `max_frames`, and video duration. Varies per-video.
+3. **`sampling_fps`** — the fps of the *text output* the model is asked to produce. Controls `_sample_at_fps` in the formatter and the "{fps}" in the prompt. Set by the dataset task (1 for `_eval_1fps`, 8 for `_eval_8fps`, resolved from `target_fps` for training).
+
+The model always sees **more frames than it predicts on** (or equal). Loaded fps >= sampling_fps.
 
 ---
 
-## Step 1: Video Encoding (offline)
+## End-to-End Flow
 
-Each dataset converts raw image frames to H.264 `.mp4` files at the dataset's `VIDEO_FPS`.
-
-**`encode_frames_to_video`** (`academic_video_track_datasets.py:118-178`):
-- Accepts `frames_dir`, `output_path`, `fps`, and optional `native_fps` for subsampling.
-- If `native_fps != fps`, keeps every `round(native_fps / fps)`-th frame before encoding.
-- Writes an ffmpeg concat-demuxer filelist and encodes with `libx264` at the target `fps`.
-
-**Per-dataset VIDEO_FPS values** (set as class constants):
-
-| Dataset | `VIDEO_FPS` | Source |
-|---------|-------------|--------|
-| Mevis   | 6           | `academic_video_track_datasets.py:1307` |
-| CFC     | 24          | `academic_video_track_datasets.py:1044` |
-| PanAf   | 18          | `academic_video_track_datasets.py:728` |
-
-The encoded `.mp4`'s internal fps matches `VIDEO_FPS`. This is the fps that the video decoder reports at load time.
-
----
-
-## Step 2: Frame Sampling at Load Time
-
-When `ExamplePreprocessor.__call__` processes an example with a `"video"` key, it calls `video_preprocessor.load_video()` which delegates to `VideoLoader.__call__` (`video_loader.py:304-365`).
-
-### Base sampler config (from `Molmo2-8B/config.yaml:148-168`)
-
-```yaml
-mm_preprocessor:
-  max_frames: 384
-  frame_sample_mode: uniform_last_frame
-  candidate_sampling_fps: [0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 16.0]
-  max_fps: [2.0]
-  time_sampling: true       # → builds a TimeSampler (not FrameSampler)
-  loading_method: torchcodec_exact
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1. Dataset.get(idx)                                                │
+│    - Builds annotation point-tracks at VIDEO_FPS (all native frames)│
+│    - Sets sampling_fps: explicit value (eval) or None (training)   │
+│    - Constructs sampler_overrides: {frame_sample_mode, candidates} │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 2. VideoLoader (TimeSampler in "fps" mode)                         │
+│    - Picks highest candidate fps that fits within max_frames       │
+│    - Decodes that many frames from the .mp4                        │
+│    - Returns VideoFrames with target_fps and timestamps            │
+│    → This determines WHAT THE MODEL SEES                           │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 3. DataFormatter.format_video_object_track_points()                │
+│    a. _filter_frames_to_video: align annotations → loaded frames   │
+│    b. Resolve sampling_fps: explicit value, or None → target_fps   │
+│    c. _sample_at_fps: subsample annotations to sampling_fps grid   │
+│    d. Build prompt: "Track {label} at {fps} FPS"                   │
+│    → This determines WHAT THE MODEL PREDICTS ON                    │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Because `time_sampling: true`, a `TimeSampler` is built (`video_loader.py:291-292`).
+---
+
+## Step 1: Dataset — Annotation and Overrides
+
+### `_build_video_annotation` (per-dataset classmethod)
+
+Each `LocalTrackingDataset` subclass builds annotation dicts with `frame_trajectories` containing point-tracks at every native frame. The annotation's `sampling_fps` is set to `VIDEO_FPS` (e.g. 24 for CFC) — this is just the annotation's native granularity, not the actual sampling target.
+
+### `LocalTrackingDataset.get()` (~line 676)
+
+```python
+ex = dict(self.data[idx])              # shallow copy
+ex['sampling_fps'] = self.sampling_fps  # override annotation value
+message_list = self._create_message_list(ex)  # reads ex['sampling_fps']
+```
+
+The key line is `ex['sampling_fps'] = self.sampling_fps`. This ensures the message_list (which the formatter reads) gets:
+- **Eval 1fps**: `sampling_fps=1`
+- **Eval 8fps**: `sampling_fps=8`
+- **Training**: `sampling_fps=None` (resolved later from loaded video)
 
 ### Sampler overrides
 
-Tracking datasets override the sampler on a per-example basis via `metadata['sampler_overrides']`. These overrides are applied in `_sampler_with_overrides` (`video_loader.py:106-123`), which uses `dataclasses.replace` to swap only fields that exist on the sampler.
-
-Both `TrackingDataset.get()` (`academic_video_track_datasets.py:529-534`) and `LocalTrackingDataset.get()` (`academic_video_track_datasets.py:691-697`) set:
+When `use_fps_sampling=True` (default), the dataset attaches per-example sampler overrides:
 
 ```python
 metadata['sampler_overrides'] = {
-    'frame_sample_mode': 'fps',              # override: switch from uniform_last_frame → fps
-    'candidate_sampling_fps': [...],         # override: dataset-specific candidates
-    'min_fps': ex['sampling_fps'],           # NOTE: ignored for TimeSampler (field doesn't exist)
+    'frame_sample_mode': 'fps',
+    'candidate_sampling_fps': self._get_candidate_fps(video_fps),
+    'min_fps': self.sampling_fps or 1,
 }
 ```
 
-The `candidate_sampling_fps` list comes from `get_candidate_sampling_fps(video_fps, self.sampling_fps or 1)` (`academic_video_track_datasets.py:213-225`), which generates multiples of `sampling_fps` that evenly divide `video_fps`, up to `MAX_VIDEO_FPS` (10).
+These override the base `TimeSampler` config (which defaults to `uniform_last_frame` mode) to use `fps` mode with dataset-specific candidates.
 
-**Important:** The `min_fps` override is silently dropped for `TimeSampler` because `TimeSampler` has no `min_fps` field. It only exists on `FrameSampler` (`video_loader.py:192`). The `_sampler_with_overrides` function filters to `valid_fields` (`video_loader.py:109-113`).
+### `get_candidate_sampling_fps(video_fps, sampling_fps)` (~line 213)
 
-### TimeSampler in `fps` mode (`video_loader.py:171-180`)
+Generates candidate fps values: multiples of `sampling_fps` that evenly divide `video_fps`, capped at `MAX_VIDEO_FPS=10`.
 
-```python
-elif self.frame_sample_mode == "fps":
-    sampling_fps = self.candidate_sampling_fps[0]
-    for candidate_fps in self.candidate_sampling_fps[1:]:
-        if max_frames / candidate_fps < duration:
-            break
-        sampling_fps = candidate_fps
-    times = np.arange(0, max_frames) / sampling_fps
-    times = times[times < duration]
-    return sampling_fps, times, None
-```
-
-It picks the **highest** candidate fps whose frame budget (`max_frames / fps`) still spans the full video duration. This maximizes temporal density while covering the whole clip.
-
-### Worked example: CFC (`cfc_track_eval_1fps`)
-
-- `VIDEO_FPS = 24`, `self.sampling_fps = 1`
-- `get_candidate_sampling_fps(24, 1)` → `[1, 2, 3, 4, 6, 8]` (multiples of 1 dividing 24, capped at 10)
-- Typical CFC clip: 128 frames at 24fps = **5.33s** duration
-- TimeSampler iterates candidates:
-  - fps=1: budget=384s > 5.33s ✓ → sampling_fps=1
-  - fps=2: budget=192s > 5.33s ✓ → sampling_fps=2
-  - ...
-  - fps=8: budget=48s > 5.33s ✓ → **sampling_fps=8**
-- Result: `times = [0, 0.125, 0.25, ..., 5.25]` → **~42 frames loaded**
-
-### Worked example: Mevis (`mevis_track_eval_1fps`)
-
-- `VIDEO_FPS = 6`, `self.sampling_fps = 1`
+Examples:
+- `get_candidate_sampling_fps(24, 1)` → `[1, 2, 3, 4, 6, 8]`
+- `get_candidate_sampling_fps(24, 8)` → `[8]`
+- `get_candidate_sampling_fps(18, 1)` → `[1, 2, 3, 6, 9]`
 - `get_candidate_sampling_fps(6, 1)` → `[1, 2, 3, 6]`
-- Typical Mevis clip: 120 frames at 6fps = **20s** duration
-- TimeSampler iterates:
-  - fps=1: budget=384s > 20s ✓ → sampling_fps=1
-  - fps=2: budget=192s > 20s ✓ → sampling_fps=2
-  - ...
-  - fps=6: budget=64s > 20s ✓ → **sampling_fps=6**
-- Result: `times = [0, 0.167, 0.333, ..., 19.83]` → **~120 frames loaded**
+
+**Note:** `min_fps` in the overrides is silently ignored by `TimeSampler` (it has no `min_fps` field). It only affects `FrameSampler`. The `_sampler_with_overrides` function filters overrides to valid sampler fields.
 
 ---
 
-## Step 3: Annotation Filtering in the Formatter
+## Step 2: Video Loading — What the Model Sees
 
-After the video is loaded, the formatter (`data_formatter.py`) processes the example's `message_list`. For tracking tasks, `format_video_object_track_points` (`data_formatter.py:1419-1515`) runs two filtering stages:
+### Base sampler config (from model config)
 
-### Stage A: `_filter_frames_to_video` (`data_formatter.py:1366-1394`)
-
-Aligns annotation frames to the **actually loaded** video timestamps. For each annotation frame, finds the closest loaded timestamp within `eps=1e-2` seconds. Drops any annotation frames that don't match a loaded frame.
-
-This is necessary because the annotations may describe frames at the native video fps (e.g. every frame at 24fps), but the video loader only sampled a subset.
-
-### Stage B: `_sample_at_fps` (`data_formatter.py:1396-1417`)
-
-Generates a 1/`sampling_fps`-spaced timestamp grid, then calls `_filter_frames_to_video` to keep only the annotation frames closest to grid points.
-
-```python
-sampling_interval = 1.0 / sampling_fps
-first_grid_point = np.ceil(start_time / sampling_interval) * sampling_interval
-target_times = np.arange(first_grid_point, end_time + 1e-6, sampling_interval)
-return self._filter_frames_to_video(frames_data, target_times)
+```yaml
+mm_preprocessor:
+  max_frames: 384          # or 128 in some SFT configs
+  frame_sample_mode: uniform_last_frame   # overridden to "fps" by tracking datasets
+  candidate_sampling_fps: [0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 16.0]
+  max_fps: [2.0]           # only used by uniform_last_frame mode
+  time_sampling: true      # → builds TimeSampler (not FrameSampler)
 ```
 
-### The critical field: `sampling_fps` in the message
+Because `time_sampling: true`, a `TimeSampler` is built. Tracking datasets override `frame_sample_mode` to `"fps"` via `sampler_overrides`.
 
-The `sampling_fps` value used in `_sample_at_fps` comes from the **message_list** (`data_formatter.py:1427`):
+### TimeSampler modes
+
+#### `"uniform_last_frame"` (default, used by non-tracking tasks)
+
+```python
+if max_fps is not None:
+    max_duration = (max_frames - 1) / max_fps
+    if max_duration < duration:
+        times = np.linspace(0, duration, num=max_frames, endpoint=True)
+    else:
+        times = np.arange(0.0, stop=duration, step=1/max_fps)
+        times = np.concatenate([times, [duration]])
+return None, times, None   # target_fps is always None
+```
+
+- `max_fps` controls the maximum temporal density. With `max_fps=[2.0]` and `max_frames=384`, videos up to `383/2 = 191.5s` get frames at 2fps. Longer videos get uniformly spaced frames.
+- **`target_fps` is always `None`** in this mode.
+
+#### `"fps"` (used by tracking datasets via sampler_overrides)
+
+```python
+sampling_fps = candidate_sampling_fps[0]   # start with lowest
+for candidate_fps in candidate_sampling_fps[1:]:
+    if max_frames / candidate_fps < duration:
+        break
+    sampling_fps = candidate_fps
+times = np.arange(0, max_frames) / sampling_fps
+times = times[times < duration]
+return sampling_fps, times, None   # target_fps = selected fps
+```
+
+- Picks the **highest** candidate fps where the frame budget (`max_frames / fps`) still spans the full video duration.
+- **`target_fps` is the selected fps** — this is what flows to the formatter.
+- `max_fps` from the base config is **ignored** in this mode (it's only read in `uniform_last_frame`).
+
+### How `max_frames` affects loaded fps
+
+The fps selection depends on `max_frames / candidate_fps >= duration`. With different `max_frames`:
+
+**CFC example (25s clip, candidates=[1,2,3,4,6,8]):**
+
+| `max_frames` | Selected fps | Frames loaded | Reasoning |
+|--------------|-------------|---------------|-----------|
+| 384 | 8 | 200 | 384/8=48s ≥ 25s |
+| 128 | 4 | 100 | 128/4=32s ≥ 25s, but 128/6=21.3s < 25s |
+| 64 | 2 | 50 | 64/2=32s ≥ 25s, but 64/3=21.3s < 25s |
+| 16 | 1 | 16 | budget too small for anything higher |
+
+**Shorter CFC clip (8s, candidates=[1,2,3,4,6,8]):**
+
+| `max_frames` | Selected fps | Frames loaded |
+|--------------|-------------|---------------|
+| 384 | 8 | 64 |
+| 128 | 8 | 64 | 128/8=16s ≥ 8s |
+| 64 | 8 | 64 | 64/8=8s ≥ 8s |
+| 16 | 1 | 8 | budget too small |
+
+So **shorter videos get higher fps** because the same frame budget covers them at denser sampling.
+
+### `max_fps` vs `candidate_sampling_fps`
+
+These control **different sampling modes** and do not interact:
+
+| Parameter | Used by | Controls |
+|-----------|---------|----------|
+| `max_fps` | `uniform_last_frame` mode | Maximum temporal density (hard cap on fps) |
+| `candidate_sampling_fps` | `fps` mode | Pool of fps values to pick from based on budget |
+
+For tracking tasks, `sampler_overrides` switch to `fps` mode, so **`max_fps` from the model config has no effect**. The loaded fps is entirely determined by `candidate_sampling_fps` and `max_frames`.
+
+---
+
+## Step 3: Formatter — What the Model Predicts On
+
+After loading, `ExamplePreprocessor` attaches the loaded `VideoFrames` object to the example (`multimodal_preprocessor.py:259`):
+```python
+example["video"] = video  # VideoFrames with .timestamps and .target_fps
+```
+
+Then the formatter's `_format_example` method sets up video info for the message (`data_formatter.py:1874`):
+```python
+if hasattr(video, "timestamps"):
+    message["video"] = {"timestamps": video.timestamps, "target_fps": video.target_fps}
+```
+
+### `format_video_object_track_points` (~line 1419)
+
+Three stages:
+
+#### Stage A: `_filter_frames_to_video` (~line 1366)
+
+Aligns raw annotation frames (at native VIDEO_FPS) to the actually-loaded timestamps. Keeps annotation frames within `eps=0.01s` of a loaded timestamp. This drops annotations for frames the model never saw.
+
+Example: CFC has 599 annotation frames at 24fps. Video loaded 200 frames at 8fps. After filtering: 200 annotation frames remain (one per loaded frame).
+
+#### Stage B: Resolve `sampling_fps` (~line 1432)
 
 ```python
 sampling_fps = example["sampling_fps"]
+if sampling_fps is None:
+    video_info = example.get("video", {})
+    sampling_fps = video_info.get("target_fps")
 ```
 
-This is set per-example by `_create_message_list` (`academic_video_track_datasets.py:480-483`):
+Resolution chain:
+- **Eval**: explicit value (1 or 8) from dataset → used directly
+- **Training**: `None` from dataset → resolves to `target_fps` from loaded video (e.g. 4 or 8, depends on `max_frames` and duration)
+
+#### Stage C: `_sample_at_fps` (~line 1396)
+
+Generates a timestamp grid at `1/sampling_fps` intervals, then keeps only annotation frames near grid points.
 
 ```python
-message_list = [{
-    "sampling_fps": ex['sampling_fps'],  # from the annotation data
-    ...
-}]
+sampling_interval = 1.0 / sampling_fps
+first_grid_point = ceil(start_time / sampling_interval) * sampling_interval
+target_times = arange(first_grid_point, end_time + 1e-6, sampling_interval)
+return _filter_frames_to_video(frames_data, target_times)
 ```
 
-For **Mevis**, `ex['sampling_fps']` comes from the HF dataset and is already filtered to match `self.sampling_fps` during `load()` (`academic_video_track_datasets.py:444-447`). So for `mevis_track_eval_1fps`, `ex['sampling_fps'] = 1`.
+When `sampling_fps == target_fps` (loaded fps), this is a **natural no-op** — the grid matches the loaded frames exactly.
 
-For **CFC**, `ex['sampling_fps']` is hardcoded to `VIDEO_FPS = 24` in `_build_video_annotation` (`academic_video_track_datasets.py:1155`). CFC's overridden `load()` (`academic_video_track_datasets.py:1057-1082`) does not filter by `self.sampling_fps`. So for `cfc_track_eval_1fps`, `ex['sampling_fps'] = 24` — regardless of the `_1fps` suffix.
+### Prompt construction (~line 1506)
+
+```python
+if sampling_fps and sampling_fps > 0:
+    prompt_keywords["fps"] = str(int(sampling_fps))
+```
+
+- If `fps` is present: uses template like `"Track {label} at {fps} FPS"`
+- If `fps` is absent (sampling_fps is None/0) or fps=="2" (50% of time): uses template like `"Track {label}."`
 
 ---
 
-## Step 4: What the Model Sees
+## Train vs Eval Summary
 
-### Timestamp prefixes
+### Eval (`cfc_track_eval_1fps`, `cfc_track_eval_8fps`)
 
-`TokenIndexingVideoPreprocessor.__call__` (`video_preprocessor.py:183-205`) prepends each frame's patch tokens with a text timestamp. With the default `time_mode = "per-frame-compact"`:
+| | 1fps eval | 8fps eval |
+|-|-----------|-----------|
+| `self.sampling_fps` | 1 | 8 |
+| `candidate_sampling_fps` | [1,2,3,4,6,8] | [8] |
+| Loaded fps (25s clip, max_frames=384) | 8 | 8 |
+| Frames model sees | ~200 | ~200 |
+| `_sample_at_fps` target | 1 | 8 (no-op) |
+| Annotation frames in output | ~25 | ~200 |
+| Prompt says | "at 1 FPS" | "at 8 FPS" |
 
-```python
-prefix = f"{frame_time:.1f}"   # e.g. "0.0", "0.5", "1.0"
-```
+**Key insight for eval:** The model sees all loaded frames (visual input), but only predicts points at the `sampling_fps` grid. For 1fps eval, the model sees 200 frames but outputs predictions at 25 timestamps.
 
-### Prompt text
+### Training (`cfc_track`)
 
-The prompt template includes the target fps (from the message's `sampling_fps`) and the object label. For `video_point_track_per_frame` style:
+| | max_frames=384 (25s clip) | max_frames=128 (25s clip) | max_frames=128 (8s clip) |
+|-|---------------------------|---------------------------|--------------------------|
+| `self.sampling_fps` | None | None | None |
+| `candidate_sampling_fps` | [1,2,3,4,6,8] | [1,2,3,4,6,8] | [1,2,3,4,6,8] |
+| Loaded fps (`target_fps`) | 8 | 4 | 8 |
+| Frames model sees | ~200 | ~100 | ~64 |
+| `sampling_fps` resolves to | 8 (from target_fps) | 4 (from target_fps) | 8 (from target_fps) |
+| `_sample_at_fps` | no-op | no-op | no-op |
+| Annotation frames in output | ~200 | ~100 | ~64 |
+| Prompt says | "at 8 FPS" | "at 4 FPS" | "at 8 FPS" |
 
-```
-Track {label} at {fps} fps.    # e.g. "Track fish at 24 fps."
-```
-
-The model's output is expected to contain point coordinates at timestamps matching the `sampling_fps` grid.
-
-### Prediction frames
-
-The model outputs predictions for the frames that survived both `_filter_frames_to_video` and `_sample_at_fps`. In correct operation (Mevis), these are the 1fps-grid frames. In the CFC bug case, these are all loaded frames (~8fps), because `_sample_at_fps(data, 24)` is a no-op.
-
----
-
-## Summary Comparison Table
-
-| Aspect | Mevis `_track_eval_1fps` | CFC `_track_eval_1fps` |
-|--------|--------------------------|------------------------|
-| `VIDEO_FPS` | 6 | 24 |
-| `self.sampling_fps` | 1 | 1 |
-| `ex['sampling_fps']` (annotation) | 1 (from HF, filtered) | **24** (hardcoded) |
-| `candidate_sampling_fps` override | `[1, 2, 3, 6]` | `[1, 2, 3, 4, 6, 8]` |
-| Video loader actual fps | up to 6fps | up to 8fps |
-| `_sample_at_fps` target | 1fps grid | **24fps grid (no-op)** |
-| Prompt says | "at 1 fps" | **"at 24 fps"** |
-| Model predicts at | 1fps | **whatever was loaded (~8fps)** |
-| Correct 1fps behavior? | Yes | **No** |
+**Key insight for training:** `sampling_fps=None` resolves to `target_fps`, so the model predicts on **every loaded frame**. The prompt dynamically says the correct fps. The actual fps varies per-video based on `max_frames / duration`.
 
 ---
 
-## Bug: CFC `_1fps` Doesn't Actually Filter to 1fps
+## TrackingDataset (Mevis, etc.) — Comparison
 
-### Symptom
+`TrackingDataset` (the HF-based parent class) works differently from `LocalTrackingDataset`:
 
-Running `cfc_track_eval_1fps` produces predictions at the video loader's sampling rate (~8fps for short clips), not at 1fps. The prompt also incorrectly says "at 24 fps".
+- Per-example `sampling_fps` comes from the HF dataset (not hardcoded to VIDEO_FPS)
+- `load()` filters the HF dataset to only examples where `sampling_fps == self.sampling_fps`
+- `get()` passes `ex['sampling_fps']` directly (no override logic needed)
+- No `None` case — `sampling_fps` is always an explicit integer from the HF data
 
-### Root cause
+This is correct because the HF dataset already has per-example `sampling_fps` values that match different annotation granularities.
 
-CFC's `_build_video_annotation` hardcodes `"sampling_fps": cls.VIDEO_FPS` (24) for every example (`academic_video_track_datasets.py:1155`). Unlike `TrackingDataset.load()`, CFC's overridden `load()` method (`academic_video_track_datasets.py:1057-1082`) does **not** call `super().load()` and therefore skips the filtering at lines 444-447 that would reject examples where `sampling_fps != self.sampling_fps`.
+---
 
-The result is that `self.sampling_fps = 1` (from the constructor) only affects the `candidate_sampling_fps` override for the video loader, but **never propagates** to the per-example `sampling_fps` field that the formatter uses for `_sample_at_fps`.
+## Per-Dataset Reference
 
-### Flow comparison
+| Dataset | `VIDEO_FPS` | `candidates(fps=1)` | `candidates(fps=8)` | Max loaded fps (384 frames, 25s) |
+|---------|-------------|---------------------|---------------------|----------------------------------|
+| CFC | 24 | [1,2,3,4,6,8] | [8] | 8 |
+| PanAf | 18 | [1,2,3,6,9] | — | 9 |
+| Mevis | 6 | [1,2,3,6] | — | 6 |
 
-**Mevis (correct):**
-```
-self.sampling_fps=1
-  → load() filters HF dataset to ex['sampling_fps']==1
-  → message_list gets sampling_fps=1
-  → formatter._sample_at_fps(data, 1) → 1fps grid ✓
-```
+---
 
-**CFC (broken):**
-```
-self.sampling_fps=1
-  → load() overridden, no filtering, ex['sampling_fps']=24
-  → message_list gets sampling_fps=24
-  → formatter._sample_at_fps(data, 24) → no-op ✗
-```
+## Debugging
 
-### Suggested fix
+Use `scripts/debug_frame_sampling.py` to trace the pipeline:
 
-In `LocalTrackingDataset.get()` (or `CFC.get()`), override the per-example `sampling_fps` when `self.sampling_fps` is set:
+```bash
+# See what frames are loaded and how annotations are filtered
+MOLMO_DATA_DIR=data python scripts/debug_frame_sampling.py cfc_track_eval_1fps --split validation
+MOLMO_DATA_DIR=data python scripts/debug_frame_sampling.py cfc_track_eval_8fps --split validation
+MOLMO_DATA_DIR=data python scripts/debug_frame_sampling.py cfc_track --split train
 
-```python
-# In LocalTrackingDataset.get() or CFC.get(), after building message_list:
-effective_sampling_fps = self.sampling_fps if self.sampling_fps is not None else ex['sampling_fps']
-
-# Use effective_sampling_fps instead of ex['sampling_fps'] in:
-# 1. message_list[0]['sampling_fps']
-# 2. The returned dict's 'sampling_fps' and 'fps' fields
+# Use a specific max_frames to simulate SFT config
+MOLMO_DATA_DIR=data python scripts/debug_frame_sampling.py cfc_track --split train --max_frames 128
 ```
 
-This would make `_sample_at_fps` receive the correct target fps (1), and the prompt would correctly say "at 1 fps".
+Output shows: raw annotation count, loaded frame count + target_fps, post-filter count, post-sample count, resolved sampling_fps, and per-object trajectory summaries.
