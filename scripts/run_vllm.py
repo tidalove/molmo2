@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from olmo.util import prepare_cli_environment, log_metrics_to_console
-from olmo.preprocessing.data_formatter import GENERAL_PROMPTS_V1, apply_keyword_prompt
+from olmo.preprocessing.data_formatter import GENERAL_PROMPTS_V1, apply_keyword_prompt, build_prompt_for_inference
 from olmo.data.get_dataset import get_dataset_by_name
 
 from vllm import LLM
@@ -82,7 +82,7 @@ def get_prompt_text(style, prompt_override, example=None):
     # Fallback for dataset-driven mode
     if example and 'message_list' in example:
         msg = example['message_list'][0]
-        return get_prompt_text(msg.get('style'), None, msg)
+        return build_prompt_for_inference(msg)
     if example and 'question' in example:
         return example['question']
     raise ValueError("No prompt source: provide --style or --prompt")
@@ -293,10 +293,11 @@ if __name__ == "__main__":
         outputs = llm.generate(vllm_inputs, sampling_params=sampling_params)
 
         # Collect results
-        for ex, output in zip(valid_examples, outputs):
+        for inp, ex, output in zip(vllm_inputs, valid_examples, outputs):
             prediction = output.outputs[0].text
             result = collect_metadata(ex)
             result["prediction"] = prediction
+            result["input"] = inp["prompt"]
             all_predictions.append(result)
 
         # Save incrementally
@@ -311,5 +312,9 @@ if __name__ == "__main__":
         if not args.task:
             log.warning("--eval requires --task, skipping evaluation")
         else:
+            # Destroy vLLM's process group so torchmetrics doesn't try NCCL sync on CPU tensors
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.destroy_process_group()
             from scripts.run_standalone_eval import run_eval
             metrics = run_eval(output_path, args.task, args.split)
