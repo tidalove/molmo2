@@ -340,6 +340,12 @@ def convert_model(
     model = model.to(torch.float32)
     state_dict = model.state_dict()
 
+    # Merge LoRA weights if model was trained with LoRA
+    if model_config.llm.lora:
+        from olmo.train.checkpointer import merge_lora_state_dict
+        scale = model_config.llm.lora_alpha / model_config.llm.lora_rank
+        state_dict = merge_lora_state_dict(state_dict, scale)
+
     new_state_dict = convert_molmo2(state_dict, hf_config, model_config.llm.weight_tying)
     hf_model.eval()
     hf_model = hf_model.to(torch.bfloat16 if use_bfloat16 else torch.float32)
