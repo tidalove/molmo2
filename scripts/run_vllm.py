@@ -114,7 +114,7 @@ def build_examples(args, dataset=None):
     return examples
 
 
-def build_vllm_input(example, style, prompt_override, processor):
+def build_vllm_input(example, style, prompt_override, processor, max_fps_override=None):
     """Build a single vLLM input dict from an example."""
     raw = example.get("raw", None)
 
@@ -135,7 +135,7 @@ def build_vllm_input(example, style, prompt_override, processor):
 
     frame_sample_mode = processor.video_processor.frame_sample_mode
     max_frames = processor.video_processor.num_frames
-    max_fps = processor.video_processor.max_fps
+    max_fps = max_fps_override if max_fps_override is not None else processor.video_processor.max_fps
     default_sampling_fps = processor.video_processor.sampling_fps
 
     messages = get_message(
@@ -195,6 +195,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=2048, help="Max generation tokens")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     parser.add_argument("--use_float32", action="store_true")
+    parser.add_argument("--max_fps", type=float, default=None,
+                        help="Override max_fps for video loading (default: from processor config)")
     parser.add_argument("--eval", action="store_true", help="Run evaluation after inference")
     parser.add_argument("--resume", action="store_true", help="Skip already-processed examples")
     parser.add_argument("--shard_index", type=int, default=None, help="Shard index for parallel eval")
@@ -280,7 +282,7 @@ if __name__ == "__main__":
         valid_examples = []
         for ex in chunk:
             try:
-                inp = build_vllm_input(ex, args.style, args.prompt, processor)
+                inp = build_vllm_input(ex, args.style, args.prompt, processor, max_fps_override=args.max_fps)
                 vllm_inputs.append(inp)
                 valid_examples.append(ex)
             except Exception as e:
