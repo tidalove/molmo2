@@ -506,7 +506,7 @@ class LlmConfig(BaseConfig):
 
     max_sequence_length: int = 1024
     """
-    The maximum input sequence length supported by the model.
+    Size of the RoPE cache, must be > the max position id the model will see. 
     """
 
     max_position_embeddings: Optional[int] = None
@@ -614,6 +614,11 @@ class LlmConfig(BaseConfig):
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
     """
     Tokenizer configuration.
+    """
+
+    can_predict_extra_tokens: bool = False
+    """
+    Can the model output image special tokens
     """
 
     init_path: Optional[str] = None
@@ -744,18 +749,29 @@ class Llm(nn.Module):
                 config.embedding_size or config.vocab_size, config.d_model, device=device)
         self.activation_checkpointing_fn = None
         if not config.weight_tying:
-            self.ff_out = nn.Linear(
-                config.d_model,
-                config.embedding_size or config.vocab_size,
-                bias=config.include_bias,
-                device=device,
-            )
-            if config.lora:
-                self.ff_out = LoRALinear(
-                    self.ff_out, config=config, layer_id=config.n_layers,
-                    rank=config.lora_rank, alpha=config.lora_alpha,
-                    dropout=config.lora_dropout,
+            if config.can_predict_extra_tokens:
+                self.ff_out = ProjectWithExtra(
+                    config.d_model,
+                    config.embedding_size or config.vocab_size,
+                    config.additional_vocab_size,
+                    bias=config.include_bias,
+                    device=device,
+                    )
+                if config.lora:
+                    return NotImplementedError("LoRA not implemented for ProjectWithExtra layer")
+            else:
+                self.ff_out = nn.Linear(
+                    config.d_model,
+                    config.embedding_size or config.vocab_size,
+                    bias=config.include_bias,
+                    device=device,
                 )
+                if config.lora:
+                    self.ff_out = LoRALinear(
+                        self.ff_out, config=config, layer_id=config.n_layers,
+                        rank=config.lora_rank, alpha=config.lora_alpha,
+                        dropout=config.lora_dropout,
+                    )
 
     def reset_parameters(self) -> None:
         if self.config.additional_vocab_size:
@@ -888,6 +904,21 @@ class Llm(nn.Module):
             raise NotImplementedError(self.config.compile)
 
     # No forward method since this is only used as part of a `Molmo` model
+
+
+class ProjectWithExtra(nn.Module):
+    def __init__(self, input_dim, output_dim, extra_dim, bias, device=None):
+        assert not bias
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(output_dim, input_dim, device=device))
+        self.new_weight = nn.Parameter(torch.zeros(extra_dim, input_dim, device=device))
+
+    def reset_parameters(self):
+        nn.init.normal_(self.weight, std=0.02)
+        nn.init.normal_(self.new_weight, std=0.02)
+
+    def forward(self, x: torch.Tensor, logits=False, logits_with_new_embedding=False) -> torch.Tensor:
+        return F.linear(x, torch.cat([self.weight, self.new_weight], dim=0))
 
 
 class Embedding(nn.Module):
