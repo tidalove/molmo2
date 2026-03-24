@@ -740,6 +740,9 @@ class Trainer:
                 compute_z_loss=compute_z_loss,
                 z_loss_scale=self.cfg.softmax_auxiliary_loss_scale,
             )
+            # tokenizer = self.model.config.build_tokenizer()
+            # log.info(f"kaidebug logits_for_loss {tokenizer.decode(torch.argmax(logits_for_loss, dim=-1)[labels != -100])}")
+            # log.info(f"kaidebug labels {tokenizer.decode(labels[labels != -100])}")
 
         loss_masks = loss_masks.to(dtype=ce_loss.dtype)
         ce_loss = torch.dot(ce_loss, loss_masks)
@@ -891,6 +894,7 @@ class Trainer:
             "connector": self.cfg.optimizer.connector_learning_rate,
             "vit": self.cfg.optimizer.vit_learning_rate,
             "llm": self.cfg.optimizer.llm_learning_rate,
+            "lora": self.cfg.optimizer.lora_learning_rate,
             "frame_selector": self.cfg.optimizer.frame_selector_learning_rate,
         }
         for group in self.optim.param_groups:
@@ -940,6 +944,8 @@ class Trainer:
             peak_gpu_mb = peak_gpu_memory()
             if peak_gpu_mb is not None:
                 metrics["System/Peak GPU Memory (MB)"] = peak_gpu_mb
+            if torch.cuda.is_available():
+                metrics["System/Peak GPU Reserved (MB)"] = torch.cuda.max_memory_reserved() / 1e6
         return metrics
 
     def log_metrics_to_console(self, prefix: str, metrics: Dict[str, float]):
@@ -1226,9 +1232,12 @@ class Trainer:
         self._start_step = self.global_step
         with torch_profiler as p:
             for epoch in range(self.epoch or 0, self.max_epochs):
+                _dl_t0 = time.monotonic()
                 for batch in self.train_loader:
+                    _dl_dt = time.monotonic() - _dl_t0
                     # Bookkeeping.
                     batch_size, seq_len = batch["input_ids"].shape
+                    log.info(f"[dataloader] Batch ready in {_dl_dt:.1f}s (seq_len={seq_len}, batch_size={batch_size})")
                     global_batch_size = batch_size * self.dp_world_size  # assumes batch size equal across ranks
                     self.global_step += 1
                     # log.info(f"{self.global_step}")
@@ -1264,8 +1273,16 @@ class Trainer:
                         # Start timing after the first step so we don't count warm-up
                         self._train_start_time = time.monotonic()
 
+                    # [TEMP] Per-step timing
+                    _step_t0 = time.monotonic()
+                    log.info(f"[step {self.global_step}] Starting train_step (batch seq_len={seq_len}, batch_size={batch_size})")
+
                     # Run train step on batch.
                     metrics = self.train_step(batch, compute_metrics=should_log_this_step)
+
+                    _step_dt = time.monotonic() - _step_t0
+                    _mem_gb = torch.cuda.max_memory_reserved() / 1e9 if torch.cuda.is_available() else 0
+                    log.info(f"[step {self.global_step}] Completed in {_step_dt:.1f}s | loss={self.cur_train_loss:.4f} | peak_gpu_reserved={_mem_gb:.1f}GB")
 
                     # Maybe collect other metrics.
                     if should_log_this_step:
@@ -1398,6 +1415,8 @@ class Trainer:
                     # Run generation 1 garbage collection.
                     if self.cfg.gen1_gc_interval is not None and self.global_step % self.cfg.gen1_gc_interval == 0:
                         gc.collect(1)
+
+                    _dl_t0 = time.monotonic()  # [TEMP] reset dataloader timer
 
                     # Python Profiler stuff
                     # We do this now, at the bottom of this loop, so we capture the work of getting the next batch.
