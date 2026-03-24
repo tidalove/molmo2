@@ -10,6 +10,7 @@ from collections import Counter
 import string
 from typing import Optional, Dict, Tuple, List, Union
 
+import logging
 import numpy as np
 
 from olmo import tokenizer
@@ -18,6 +19,8 @@ from olmo.preprocessing.multiple_choice_templates import template_mc_question
 from olmo.preprocessing.point_formatter import LegacyPointFormatting, UnifiedPointFormatter, \
     PointFormatter
 from olmo.util import parse_timestamp
+
+log = logging.getLogger(__name__)
 
 GENERAL_PROMPTS_V1 = {
     "short_answer": [
@@ -776,6 +779,7 @@ class DataFormatter(BaseConfig):
 
     _point_formatter: Optional[PointFormatter] = dataclasses.field(default=None, metadata={"omegaconf_ignore": True})
     sample_random_initial_point: bool = True  # For video point tracking, whether to sample random initial point
+    max_output_fps: Optional[int] = 2  # Cap output fps for video tracking (model trained on ≤2fps)
 
     def __post_init__(self):
         if self.pointing_format in ["html-v1", "html-v2"]:
@@ -1429,6 +1433,16 @@ class DataFormatter(BaseConfig):
         input_points = None
         scale = self._get_scale(example)
 
+        # Resolve sampling_fps from loaded video if not explicitly set by dataset
+        if sampling_fps is None:
+            video_info = example.get("video", {})
+            sampling_fps = video_info.get("target_fps")
+
+        # Cap output fps if configured
+        if self.max_output_fps is not None and sampling_fps is not None and sampling_fps > self.max_output_fps:
+            # log.warning(f"Capping output sampling_fps from {sampling_fps} to {self.max_output_fps}")
+            sampling_fps = self.max_output_fps
+
         if "points" not in example or not example["points"]:
             prompt_keywords = dict(label=label)
             if sampling_fps and sampling_fps > 0:
@@ -1503,8 +1517,8 @@ class DataFormatter(BaseConfig):
                 prompt_keywords["fps"] = str(int(sampling_fps))
             if input_points is not None:
                 prompt_keywords["input_points"] = input_points
-            if style == "video_point_track_per_frame" and prompt_keywords["fps"] == '2' and rng.random() < 0.5:
-                del prompt_keywords["fps"]
+            if "fps" not in prompt_keywords or (style == "video_point_track_per_frame" and prompt_keywords["fps"] == '2' and rng.random() < 0.5):
+                prompt_keywords.pop("fps", None)
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1["video_point_track_per_frame_default_fps"], prompt_keywords, rng, dbg=self.debug)
             else:
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], prompt_keywords, rng, dbg=self.debug)
