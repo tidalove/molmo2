@@ -674,7 +674,11 @@ class LocalTrackingDataset(TrackingDataset):
     # ── Item retrieval ─────────────────────────────────────────────────────
 
     def get(self, idx, rng):
-        ex = self.data[idx]
+        ex = dict(self.data[idx])  # shallow copy — don't mutate cached data
+
+        # self.sampling_fps is set explicitly (e.g. 1 for eval); None = "resolve from loaded video"
+        ex['sampling_fps'] = self.sampling_fps     # _create_message_list reads this
+
         video_path = join(self.video_dir, ex['video'] + '.mp4')
         message_list = self._create_message_list(ex)
 
@@ -693,15 +697,15 @@ class LocalTrackingDataset(TrackingDataset):
                 'frame_sample_mode': 'fps',
                 'candidate_sampling_fps': self._get_candidate_fps(
                     ex.get('fps', self.VIDEO_FPS)),
-                'min_fps': ex['sampling_fps'],
+                'min_fps': self.sampling_fps or 1,
             }
 
         item = {
             'video': video_path,
             'message_list': message_list,
-            'sampling_fps': ex['sampling_fps'],
+            'sampling_fps': self.sampling_fps,
             'metadata': metadata,
-            'fps': str(ex['sampling_fps']),
+            'fps': str(self.sampling_fps) if self.sampling_fps else None,
             'label': ex['expression']
         }
 
@@ -725,7 +729,7 @@ class PanAf(LocalTrackingDataset):
     DATASET_NAME = "panaf"
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
     TASKS = ['track']
-    VIDEO_FPS = 18
+    VIDEO_FPS = 6
     SPLIT_MAP = {
         "sample": "val_sample"
     }
@@ -872,7 +876,7 @@ class PanAfICL(PanAf):
     burned into frames as blue dots; model must continue tracking afterward."""
 
     DATASET_NAME = "panaf_icl"
-    VIDEO_FPS = 18
+    VIDEO_FPS = 6
     FRAME_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAfICL")
     TASKS = ['track']
@@ -993,7 +997,7 @@ class PanAfICL(PanAf):
 class PanAfGuided(PanAf):
     """PanAf with detailed caption prepended to prompt."""
     DATASET_NAME = "panaf_guided"
-    VIDEO_FPS = 18
+    VIDEO_FPS = 6
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "PanAf")
     TASKS = ['track']
     SPLIT_MAP = {
@@ -1041,11 +1045,12 @@ class CFC(LocalTrackingDataset):
     DATASET_NAME = "cfc"
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
     TASKS = ['track']
-    VIDEO_FPS = 24
+    VIDEO_FPS = 6
     SPLIT_MAP = {
-        # "train": "kenai-train-subsampled",
-        # "validation": "kenai-val",
+        "train": "kenai-train-subsampled",
+        "validation": "kenai-val",
         "sample": "val_sample",
+        "sample-short": "val_sample_short"
     }
     EXPRESSION = "fish"
 
@@ -1229,6 +1234,68 @@ class CFC(LocalTrackingDataset):
         log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
                  f"{n_encoded} new, {n_skipped} already exist, "
                  f"out of {len(images_by_video)} videos.")
+
+
+class CFCMultiTurn(CFC):
+    DATASET_NAME = "cfc"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
+    TASKS = ["track"]
+    VIDEO_FPS = 6
+    SPLIT_MAP = {
+        "train": "kenai-train-subsampled",
+        "validation": "kenai-val",
+        "sample": "val_sample",
+    }
+    EXPRESSION = "fish"
+
+    def _create_message_list(self, ex):
+        """Create multi-turn message list"""
+        prompts = ex.get("prompts")
+        
+        message_list = []
+        for i in range(5):
+            message_list.append(dict(
+                width=ex['width'],
+                height=ex['height'],
+                prompt=prompts[i],
+                points=f"This is answer number {i}.",
+                style="video_point_track_per_frame"
+            ))
+        return message_list
+
+    def get(self, idx, rng):
+        ex = self.data[idx]
+        video_fps = ex.get("fps", self.VIDEO_FPS)
+
+        video_rel_path = ex['video'] + '.mp4'
+        video_path = join(self.video_dir, video_rel_path)
+        message_list = self._create_message_list(ex)
+
+        metadata = {
+            'example_id': ex['id'],
+            'task': self.task,
+            'expression': ex['expression'],
+            'w': ex['width'],
+            'h': ex['height'],
+            'video_fps': video_fps,
+            'video': ex['video'],
+        }
+
+        if self.use_fps_sampling:
+            metadata['sampler_overrides'] = {
+                'frame_sample_mode': 'fps',
+                'candidate_sampling_fps': self._get_candidate_fps(video_fps),
+                'min_fps': ex['sampling_fps'],
+            }
+
+        return {
+            'video': video_path,
+            'multi_turn_messages': message_list,
+            'sampling_fps': ex['sampling_fps'],
+            'metadata': metadata,
+            'fps': str(ex['sampling_fps']),
+            'label': ex['expression']
+        }
 
 class SAFARI(LocalTrackingDataset):
     DATASET_NAME = "safari"
