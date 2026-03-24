@@ -8,7 +8,7 @@ There are **three distinct fps concepts** in the pipeline:
 
 1. **`VIDEO_FPS`** — the native fps of the encoded `.mp4` (e.g. CFC=24, PanAf=18). Set offline, never changes at runtime.
 2. **Loaded fps (`target_fps`)** — how many frames the model actually *sees*. Determined at load time by `TimeSampler` based on `candidate_sampling_fps`, `max_frames`, and video duration. Varies per-video.
-3. **`sampling_fps`** — the fps of the *text output* the model is asked to produce. Controls `_sample_at_fps` in the formatter and the "{fps}" in the prompt. Set by the dataset task (1 for `_eval_1fps`, 8 for `_eval_8fps`, resolved from `target_fps` for training).
+3. **`sampling_fps`** — the fps of the *text output* the model is asked to produce. Controls `_sample_at_fps` in the formatter and the "{fps}" in the prompt. Set by the dataset task (1 for `_eval_1fps`, 8 for `_eval_8fps`, resolved from `target_fps` for training). **Capped at `max_output_fps` (default 2)** since the model was trained on ≤2fps output.
 
 The model always sees **more frames than it predicts on** (or equal). Loaded fps >= sampling_fps.
 
@@ -36,8 +36,9 @@ The model always sees **more frames than it predicts on** (or equal). Loaded fps
 │ 3. DataFormatter.format_video_object_track_points()                │
 │    a. _filter_frames_to_video: align annotations → loaded frames   │
 │    b. Resolve sampling_fps: explicit value, or None → target_fps   │
-│    c. _sample_at_fps: subsample annotations to sampling_fps grid   │
-│    d. Build prompt: "Track {label} at {fps} FPS"                   │
+│    c. Cap sampling_fps at max_output_fps (default 2)               │
+│    d. _sample_at_fps: subsample annotations to sampling_fps grid   │
+│    e. Build prompt: "Track {label} at {fps} FPS"                   │
 │    → This determines WHAT THE MODEL PREDICTS ON                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -201,18 +202,31 @@ Aligns raw annotation frames (at native VIDEO_FPS) to the actually-loaded timest
 
 Example: CFC has 599 annotation frames at 24fps. Video loaded 200 frames at 8fps. After filtering: 200 annotation frames remain (one per loaded frame).
 
-#### Stage B: Resolve `sampling_fps` (~line 1432)
+#### Stage B: Resolve `sampling_fps` and apply output cap (~line 1432)
 
 ```python
 sampling_fps = example["sampling_fps"]
 if sampling_fps is None:
     video_info = example.get("video", {})
     sampling_fps = video_info.get("target_fps")
+
+# Cap output fps (DataFormatter.max_output_fps, default=2)
+if self.max_output_fps is not None and sampling_fps is not None and sampling_fps > self.max_output_fps:
+    sampling_fps = self.max_output_fps
 ```
 
 Resolution chain:
 - **Eval**: explicit value (1 or 8) from dataset → used directly
 - **Training**: `None` from dataset → resolves to `target_fps` from loaded video (e.g. 4 or 8, depends on `max_frames` and duration)
+
+Then the **`max_output_fps` cap** is applied. The model was trained on ≤2fps output (Mevis 1-2fps, Molmo2VideoTrack 1-2fps), so `DataFormatter.max_output_fps` defaults to 2. This caps the resolved `sampling_fps` — the model still *sees* all loaded frames, but only *predicts* at the capped rate. A warning is logged when capping occurs.
+
+To override for high-fps eval, set `max_output_fps` in the config or via CLI:
+```bash
+# eval.py supports dotlist overrides
+torchrun ... launch_scripts/eval.py Molmo2-8B --task cfc_track_eval_8fps \
+  --model.data_formatter.max_output_fps=8
+```
 
 #### Stage C: `_sample_at_fps` (~line 1396)
 
@@ -241,19 +255,19 @@ if sampling_fps and sampling_fps > 0:
 
 ## Train vs Eval Summary
 
-### Eval (`cfc_track_eval_1fps`, `cfc_track_eval_8fps`)
+### Eval (`cfc_track_eval_1fps`, `cfc_track_eval_2fps`, `cfc_track_eval_8fps`)
 
-| | 1fps eval | 8fps eval |
-|-|-----------|-----------|
-| `self.sampling_fps` | 1 | 8 |
-| `candidate_sampling_fps` | [1,2,3,4,6,8] | [8] |
-| Loaded fps (25s clip, max_frames=384) | 8 | 8 |
-| Frames model sees | ~200 | ~200 |
-| `_sample_at_fps` target | 1 | 8 (no-op) |
-| Annotation frames in output | ~25 | ~200 |
-| Prompt says | "at 1 FPS" | "at 8 FPS" |
+| | 1fps eval | 2fps eval | 8fps eval (cap overridden) |
+|-|-----------|-----------|---------------------------|
+| `self.sampling_fps` | 1 | 2 | 8 |
+| `candidate_sampling_fps` | [1,2,3,4,6,8] | [1,2,3,4,6,8] | [8] |
+| Loaded fps (25s clip, max_frames=384) | 8 | 8 | 8 |
+| Frames model sees | ~200 | ~200 | ~200 |
+| After `max_output_fps` cap | 1 (under cap) | 2 (at cap) | 8 (requires override) |
+| Annotation frames in output | ~25 | ~50 | ~200 |
+| Prompt says | "at 1 FPS" | "at 2 FPS" | "at 8 FPS" |
 
-**Key insight for eval:** The model sees all loaded frames (visual input), but only predicts points at the `sampling_fps` grid. For 1fps eval, the model sees 200 frames but outputs predictions at 25 timestamps.
+**Key insight for eval:** The model sees all loaded frames (visual input), but only predicts points at the `sampling_fps` grid. For 1fps eval, the model sees 200 frames but outputs predictions at 25 timestamps. The 8fps eval requires `--model.data_formatter.max_output_fps=8` to bypass the default 2fps cap.
 
 ### Training (`cfc_track`)
 
@@ -263,12 +277,11 @@ if sampling_fps and sampling_fps > 0:
 | `candidate_sampling_fps` | [1,2,3,4,6,8] | [1,2,3,4,6,8] | [1,2,3,4,6,8] |
 | Loaded fps (`target_fps`) | 8 | 4 | 8 |
 | Frames model sees | ~200 | ~100 | ~64 |
-| `sampling_fps` resolves to | 8 (from target_fps) | 4 (from target_fps) | 8 (from target_fps) |
-| `_sample_at_fps` | no-op | no-op | no-op |
-| Annotation frames in output | ~200 | ~100 | ~64 |
-| Prompt says | "at 8 FPS" | "at 4 FPS" | "at 8 FPS" |
+| `sampling_fps` resolves to | 8 → **2** (capped) | 4 → **2** (capped) | 8 → **2** (capped) |
+| Annotation frames in output | ~50 | ~50 | ~16 |
+| Prompt says | "at 2 FPS" | "at 2 FPS" | "at 2 FPS" |
 
-**Key insight for training:** `sampling_fps=None` resolves to `target_fps`, so the model predicts on **every loaded frame**. The prompt dynamically says the correct fps. The actual fps varies per-video based on `max_frames / duration`.
+**Key insight for training:** `sampling_fps=None` resolves to `target_fps`, then gets capped by `max_output_fps` (default 2). The model sees all loaded frames but only predicts at ≤2fps — matching what it was pretrained on. To train at higher output fps, set `model_cfg.data_formatter.max_output_fps` in `sft.py`.
 
 ---
 

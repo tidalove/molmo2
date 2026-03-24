@@ -173,7 +173,8 @@ TRACKING_MIXTURE = [
 
 INDIVIDUAL_DATASETS = {
     "cfc_track": "tracking",
-    "panaf_track": "tracking"
+    "panaf_track": "tracking",
+    "cfc_multi": "tracking"
 }
 
 
