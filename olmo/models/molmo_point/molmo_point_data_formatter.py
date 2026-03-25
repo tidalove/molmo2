@@ -546,6 +546,7 @@ class MolmoPointDataFormatter(BaseConfig):
         style = example["style"]
         label = example["label"]
         sampling_fps = example["sampling_fps"]
+        prepend = example.get("prepend", None)
         input_points = None
         scale = self._get_scale(example)
 
@@ -554,6 +555,10 @@ class MolmoPointDataFormatter(BaseConfig):
             if sampling_fps and sampling_fps > 0:
                 prompt_keywords["fps"] = str(int(sampling_fps))
             prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], prompt_keywords, rng, dbg=self.debug)
+            
+            if prepend is not None:
+                prompt = prepend + prompt
+            
             return None, prompt, "There are none."
 
         # Get actual video timestamps if available
@@ -631,6 +636,10 @@ class MolmoPointDataFormatter(BaseConfig):
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1["video_point_track_per_frame_default_fps"], prompt_keywords, rng, dbg=self.debug)
             else:
                 prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], prompt_keywords, rng, dbg=self.debug)
+        
+        if prepend is not None:
+            prompt = prepend + prompt
+        
         return point, prompt, output
 
     def format_video_point_track_points(self, example, initial_points):
