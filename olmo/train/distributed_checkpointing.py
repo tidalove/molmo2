@@ -264,8 +264,11 @@ def load_model_and_optim_state(
             model.frame_selection_score_scaler.reset_parameters()
         state_dict = _prepare_state_dict(model, optim, process_group=process_group)
 
-    if key_mapping is None:
-        key_mapping = model.get_legacy_key_mapping()
+    legacy_mapping = model.get_legacy_key_mapping()
+    if legacy_mapping is not None:
+        if key_mapping is None:
+            key_mapping = {}
+        key_mapping.update(legacy_mapping)
     if key_mapping is not None:
         for current_key, original_key in key_mapping.items():
             if f"model.{original_key}" not in metadata.state_dict_metadata:
@@ -398,9 +401,9 @@ def load_model_and_optim_state(
 
     # Initialize LoRA adapter params (A/B) that weren't in the checkpoint
     if lora_key_mapping:
-        from olmo.nn.llm import LoRALinear
+        from olmo.nn.llm import LoRALinear, LoRAProjectWithExtra
         for module in model.modules():
-            if isinstance(module, LoRALinear):
+            if isinstance(module, (LoRALinear, LoRAProjectWithExtra)):
                 module.reset_parameters()
 
     if optim is not None:

@@ -96,6 +96,10 @@ def merge_lora_state_dict(state_dict: dict, scale: float) -> dict:
         if bias_key in state_dict:
             merged[f"{lp}.bias"] = state_dict[bias_key]
 
+        new_weight_key = f"{lp}.og_linear.new_weight"
+        if new_weight_key in state_dict:
+            merged[f"{lp}.new_weight"] = state_dict[new_weight_key]
+
     return merged
 
 

@@ -5,7 +5,10 @@ For example, converting points to text, or applying prompt templates
 import dataclasses
 import random
 from collections import Counter
+import logging
 import string
+
+log = logging.getLogger(__name__)
 from typing import Optional, Dict, Tuple, List, Union, Any
 
 import numpy as np
@@ -59,6 +62,7 @@ class MolmoPointDataFormatter(BaseConfig):
     use_seperate_count_without_pointing_style: bool = False
 
     sample_random_initial_point: bool = True  # For video point tracking, whether to sample random initial point
+    max_output_fps: Optional[int] = 2  # Cap output fps for video tracking (model trained on ≤2fps)
     _point_start_token: bool = False
     include_point_number: Optional[str] = "no_space"
 
@@ -549,6 +553,16 @@ class MolmoPointDataFormatter(BaseConfig):
         prepend = example.get("prepend", None)
         input_points = None
         scale = self._get_scale(example)
+
+        # Resolve sampling_fps from loaded video if not explicitly set by dataset
+        if sampling_fps is None:
+            video_info = example.get("video", {})
+            sampling_fps = video_info.get("target_fps")
+
+        # Cap output fps if configured
+        if self.max_output_fps is not None and sampling_fps is not None and sampling_fps > self.max_output_fps:
+            # log.warning(f"Capping output sampling_fps from {sampling_fps} to {self.max_output_fps}")
+            sampling_fps = self.max_output_fps
 
         if "points" not in example or not example["points"]:
             prompt_keywords = dict(label=label)

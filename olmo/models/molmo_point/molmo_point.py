@@ -445,7 +445,12 @@ class MolmoPoint(ModelBase):
         self._space_token = tmp[0]
 
     def get_legacy_key_mapping(self):
-        return {f"connector.{k}": f"connectors.0.{k}" for k in self.connector.state_dict().keys()}
+        # Strip _checkpoint_wrapped_module from target keys since the old checkpoint
+        # was saved without activation checkpointing on the connector
+        return {
+            f"connector.{k}": f"connectors.0.{k.replace('_checkpoint_wrapped_module.', '')}"
+            for k in self.connector.state_dict().keys()
+        }
 
     def get_pointing_modules(self):
         for mod in [
@@ -528,7 +533,11 @@ class MolmoPoint(ModelBase):
         if self.config.llm.additional_vocab_size:
             parameters.append(self.transformer.wte.new_embedding)
         if not self.config.llm.weight_tying:
-            parameters.append(self.transformer.ff_out.new_weight)
+            ff_out = self.transformer.ff_out
+            if hasattr(ff_out, 'og_linear'):
+                parameters.append(ff_out.og_linear.new_weight)
+            else:
+                parameters.append(ff_out.new_weight)
         return parameters
 
     def get_vit_parameters(self) -> Iterator[torch.Tensor]:
@@ -536,7 +545,15 @@ class MolmoPoint(ModelBase):
 
     def get_llm_parameters(self) -> Iterator[torch.Tensor]:
         c_params = set(self.get_connector_parameters())
-        return [p for p in self.transformer.parameters() if p not in c_params]
+        lora_params = set(self.get_lora_parameters())
+        return [p for p in self.transformer.parameters() if p not in c_params and p not in lora_params]
+
+    def get_lora_parameters(self) -> Iterator[torch.Tensor]:
+        from olmo.nn.llm import LoRALinear, LoRAProjectWithExtra
+        for module in self.transformer.modules():
+            if isinstance(module, LoRALinear) or isinstance(module, LoRAProjectWithExtra):
+                yield module.A
+                yield module.B
 
     def get_non_weight_decay_params(self) -> Iterator[torch.Tensor]:
         exclude_list = {
@@ -864,6 +881,17 @@ class MolmoPoint(ModelBase):
                 x.view(-1, x.shape[-1])[is_loc_token.view(-1)] += loc_embed.to(dtype=x.dtype)
         else:
             target_patch_ids = None
+            # Dummy forward passes so FSDP models stay in sync
+            # The embed FSDP group modules are only called when point_target_ids is not None,
+            # so we need dummy forwards here to keep allgather ops consistent across ranks
+            if self.build_vit_embedding is not None:
+                self.build_vit_embedding(x.new_zeros(0, self.build_vit_embedding.in_features))
+            if self.build_pointing_embedding is not None:
+                self.build_pointing_embedding(x.new_zeros(0, self.build_pointing_embedding.in_features))
+            if self.vit_pos_embed is not None:
+                self.vit_pos_embed(torch.zeros(0, device=x.device, dtype=torch.long))
+            if self.loc_pos_embed is not None:
+                self.loc_pos_embed(torch.zeros(0, device=x.device, dtype=torch.long))
 
         if not self.config.llm.rope:
             raise NotImplementedError()
@@ -1063,6 +1091,8 @@ class MolmoPoint(ModelBase):
                     subpatch_mask = vit_features_mask[batch_idx, with_subpatch_patch_ids.squeeze(1)]
                     subpatch_logits = torch.where(subpatch_mask, subpatch_logits, -100000)
             else:
+                # Dummy forward pass so FSDP models stay in sync
+                self.subpatch_q(x[:, :0])
                 subpatch_point_q = None
         elif any_subpatch_predictors and not doing_prefilling:
             subpatch_x = x_norm.view(-1, x.shape[-1])[subpatch_predictor_tokens.view(-1)]
@@ -1096,6 +1126,8 @@ class MolmoPoint(ModelBase):
                 if point_target_ids is not None:
                     location_logits = self.subpatch_loc_k(x.squeeze(1))
                 else:
+                    # Dummy forward pass so FSDP models stay in sync
+                    self.subpatch_loc_k(x[:, :0])
                     location_logits = None
             elif torch.any(is_loc_token):
                 loc_predictor_tokens = F.pad(is_loc_token[:, 1:], [0, 1])

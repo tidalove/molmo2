@@ -715,7 +715,7 @@ def remap_state_dict_for_lora(state_dict: dict, model: nn.Module) -> dict:
     """
     lora_module_names = set()
     for name, module in model.named_modules():
-        if isinstance(module, LoRALinear):
+        if isinstance(module, (LoRALinear, LoRAProjectWithExtra)):
             lora_module_names.add(name)
 
     remapped = {}
@@ -758,7 +758,14 @@ class Llm(nn.Module):
                     device=device,
                     )
                 if config.lora:
-                    return NotImplementedError("LoRA not implemented for ProjectWithExtra layer")
+                    self.ff_out = LoRAProjectWithExtra(
+                        self.ff_out,
+                        config=config,
+                        layer_id=config.n_layers,
+                        rank=config.lora_rank,
+                        alpha=config.lora_alpha,
+                        dropout=config.lora_dropout
+                    )
             else:
                 self.ff_out = nn.Linear(
                     config.d_model,
@@ -793,9 +800,9 @@ class Llm(nn.Module):
 
         self.ln_f.reset_parameters()
         if hasattr(self, "ff_out"):
-            ff_out_target = self.ff_out.og_linear if isinstance(self.ff_out, LoRALinear) else self.ff_out
+            ff_out_target = self.ff_out.og_linear if isinstance(self.ff_out, (LoRALinear, LoRAProjectWithExtra)) else self.ff_out
             init_weights(self.config, ff_out_target, type_of_module=ModuleType.final_out)
-            if isinstance(self.ff_out, LoRALinear):
+            if isinstance(self.ff_out, (LoRALinear, LoRAProjectWithExtra)):
                 self.ff_out.reset_parameters()
         for block in self.blocks:
             block.reset_parameters()
@@ -876,7 +883,7 @@ class Llm(nn.Module):
             if self.config.lora:
                 # Initialize LoRA A/B params (not loaded from pretrained checkpoint)
                 for module in self.modules():
-                    if isinstance(module, LoRALinear):
+                    if isinstance(module, (LoRALinear, LoRAProjectWithExtra)):
                         module.reset_parameters()
 
     def apply_fsdp2(self, **kwargs):
@@ -905,6 +912,50 @@ class Llm(nn.Module):
 
     # No forward method since this is only used as part of a `Molmo` model
 
+class LoRAProjectWithExtra(nn.Module):
+    def __init__(self, 
+                 og_linear: ProjectWithExtra,
+                 config: LlmConfig, 
+                 layer_id: int,
+                 rank: int = 16,
+                 alpha: float = 32.0,
+                 dropout: float = 0.05,
+                 ):
+        super().__init__()
+        self.og_linear = og_linear
+        self.rank = rank
+        self.alpha = alpha
+        self.scale = alpha / rank
+        self.config = config
+        self.layer_id = layer_id
+
+        input_dim = self.og_linear.weight.shape[1]
+        output_dim = self.og_linear.weight.shape[0]
+
+        self.A = nn.Parameter(torch.empty(rank, input_dim))
+        self.B = nn.Parameter(torch.zeros(output_dim, rank))
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        for parameter in self.og_linear.parameters():
+            parameter.requires_grad = False
+    
+    def forward(self, x: torch.Tensor, logits=False, logits_with_new_embedding=False) -> torch.Tensor:
+        weight = self.og_linear.weight + (self.B @ self.A) * self.scale
+        return F.linear(self.dropout(x), torch.cat([weight, self.og_linear.new_weight], dim=0))
+
+    def merge_weights(self) -> ProjectWithExtra:
+        """
+        Merge LoRA weights into the original self.weight and return it, to reconstruct model w/o LoRA adapters
+        """
+        with torch.no_grad():
+            delta_w = (self.B @ self.A) * self.scale
+            self.og_linear.weight.add_(delta_w)
+        
+        return self.og_linear
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
+        nn.init.zeros_(self.B)
 
 class ProjectWithExtra(nn.Module):
     def __init__(self, input_dim, output_dim, extra_dim, bias, device=None):
