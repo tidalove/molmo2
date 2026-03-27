@@ -13,6 +13,7 @@ from olmo.eval.eval_utils import get_evaluation
 from olmo.models.molmo.molmo import MolmoConfig
 from olmo.models.molmo2.molmo2 import Molmo2Config
 from olmo.models.molmo2.molmo2_preprocessor import Molmo2PreprocessorConfig
+from olmo.models.molmo_point.molmo_point import MolmoPointConfig
 from olmo.preprocessing.multicrop_preprocessor import MultiCropConfig
 from olmo.preprocessing.text_preprocessor import MessageWeight
 from olmo.preprocessing.video_preprocessor import VideoPreprocessorConfig
@@ -236,6 +237,10 @@ TRACKING_MIXTURE_v2_1 = [
 
 def get_model(checkpoint, model):
     model_cfg = MolmoConfig.load(join(checkpoint, "config.yaml"), key="model")
+
+    if isinstance(model_cfg, MolmoPointConfig):
+        return get_molmo_point_model(model_cfg)
+
     video_preprocessor_cfg = VideoPreprocessorConfig(
         pooling_h=3,
         pooling_w=3,
@@ -288,6 +293,37 @@ def get_model(checkpoint, model):
 
     # Reduce shared memory requirements
     model_cfg.vision_backbone.normalize_on_gpu = True
+
+    return model_cfg
+
+
+def get_molmo_point_model(model_cfg):
+    """Apply fine-tuning overrides to a MolmoPointConfig loaded from checkpoint."""
+    # Video settings for fine-tuning (reduce from long-context 384 frames)
+    model_cfg.mm_preprocessor.video.max_frames = 128
+    model_cfg.mm_preprocessor.video.loading_method = "torchcodec_exact"
+    model_cfg.mm_preprocessor.video.frame_sample_mode = "uniform_last_frame"
+    model_cfg.mm_preprocessor.video.max_fps = [2]
+    model_cfg.mm_preprocessor.video.time_sampling = True
+    model_cfg.mm_preprocessor.video.max_subtitle_tokens = None
+
+    # SFT settings
+    model_cfg.mm_preprocessor.last_message_loss_only = True
+    model_cfg.mm_preprocessor.loss_token_weighting = "root_subsegments_root_tokens"
+
+    # Multi-image settings
+    model_cfg.mm_preprocessor.image.max_multi_image_crops = 8
+    model_cfg.mm_preprocessor.image.max_images = 5
+
+    # Sequence length for fine-tuning (128 frames)
+    model_cfg.llm.max_sequence_length = 4096 * 4
+
+    # Dropout
+    model_cfg.llm.residual_dropout = 0.1
+    model_cfg.llm.response_residual_dropout = 0.0
+
+    # Reduce shared memory requirements
+    model_cfg.connector.normalize_on_gpu = True
 
     return model_cfg
 
@@ -454,7 +490,7 @@ def main():
     parser.add_argument("--model", default="video")
     parser.add_argument("--seq_len", type=int, default=16384)
     parser.add_argument("--device_batch_size", default=2, type=int)
-    parser.add_argument("--max_loss_examples", default=2048, type=int)
+    parser.add_argument("--max_loss_examples", default=64, type=int)
     parser.add_argument("--max_inf_eval_examples", default=1280, type=int)
     parser.add_argument("--prefetch_factor", default=4, type=int)
     parser.add_argument("--num_workers", default=16, type=int)
@@ -492,6 +528,9 @@ def main():
             "mvbench",
             "vixmo_points_count:val"
         ]
+    elif args.mixture in INDIVIDUAL_DATASETS:
+        loss_eval_tasks = [f'{args.mixture}:validation']
+        eval_tasks=[]
     else:
         loss_eval_tasks = []
         eval_tasks = []
@@ -618,7 +657,7 @@ def main():
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
-        max_duration=100,
+        max_duration=1, # KAIDEBUG
         stop_at="${max_duration}",
         max_grad_norm=1,
         batch_divisor=BatchDivisor.global_batch,
@@ -631,7 +670,7 @@ def main():
         inf_evaluators=evaluations,
         evaluators=loss_evaluations,
         inf_eval_interval=-1,
-        eval_interval=-1,
+        eval_interval=1, # KAIDEBUG
         save_final_unsharded_checkpoint=True,
         save_final_optim=True,
         response_logits_only=True,
