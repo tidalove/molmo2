@@ -2245,15 +2245,27 @@ class VideoObjectTrackingEval(Evaluator):
             gt_masks = metadata['masks'] # Ex: {'mask_id': [mask_list per frame], ...}
 
             # Decode prediction to match GT format
-            if isinstance(pred_seq, str):
-                pred = pred_seq
-            else:
-                pred = vocab.decode(pred_seq[pred_seq >= 0]).strip()
             video_fps = metadata['video_fps'] # Used for converting time to frame index
-            pred_tracks = extract_tracks(
-                pred, width, height, video_fps,
-                format='video_point_track_per_frame'
-            )
+            if isinstance(pred_seq, list):
+                # Pre-parsed points (e.g. MolmoPoint): [[obj_id, time_sec, x, y], ...]
+                from collections import defaultdict as _defaultdict
+                frames_by_time = _defaultdict(dict)
+                for obj_id, t, x, y in pred_seq:
+                    frame = round(t * video_fps)
+                    frames_by_time[(frame, t)][int(obj_id)] = {'point': [x, y], 'occluded': False}
+                pred_tracks = [
+                    {'frame': f, 'time': t, 'points': pts}
+                    for (f, t), pts in sorted(frames_by_time.items())
+                ]
+            else:
+                if isinstance(pred_seq, str):
+                    pred = pred_seq
+                else:
+                    pred = vocab.decode(pred_seq[pred_seq >= 0]).strip()
+                pred_tracks = extract_tracks(
+                    pred, width, height, video_fps,
+                    format='video_point_track_per_frame'
+                )
 
             # try:
             # Evaluate video point tracking by checking if it's in mask.
