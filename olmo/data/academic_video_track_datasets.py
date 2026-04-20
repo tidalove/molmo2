@@ -1050,7 +1050,19 @@ class CFC(LocalTrackingDataset):
         "train": "kenai-train-subsampled",
         "validation": "kenai-val",
         "sample": "val_sample",
-        "sample-short": "val_sample_short"
+        "sample-short": "val_sample_short",
+        "val-short": "kenai-val-short",
+        "train-short": "kenai-train-short",
+        "val-easy": "kenai-val-easy",
+        "train-easy": "kenai-train-easy",
+        "elwha-short": "elwha-short",
+        "nushagak-short": "nushagak-short",
+        "rightbank-short": "kenai-rightbank-short",
+        "elwha-easy": "elwha-easy",
+        "nushagak-easy": "nushagak-easy",
+        "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers-short": "all-rivers-short",
+        "all-rivers-easy": "all-rivers-easy",
     }
     EXPRESSION = "fish"
 
@@ -1236,6 +1248,60 @@ class CFC(LocalTrackingDataset):
                  f"out of {len(images_by_video)} videos.")
 
 
+class CFCGuided(CFC):
+    """CFC with detailed caption prepended to prompt."""
+    DATASET_NAME = "cfc_guided"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
+    TASKS = ['track']
+    VIDEO_FPS = 6
+    SPLIT_MAP = {
+        "train": "kenai-train-subsampled",
+        "validation": "kenai-val",
+        "sample": "val_sample",
+        "sample-short": "val_sample_short",
+        "val-short": "kenai-val-short",
+        "train-short": "kenai-train-short",
+        "val-easy": "kenai-val-easy",
+        "train-easy": "kenai-train-easy",
+        "elwha-short": "elwha-short",
+        "nushagak-short": "nushagak-short",
+        "rightbank-short": "kenai-rightbank-short",
+        "elwha-easy": "elwha-easy",
+        "nushagak-easy": "nushagak-easy",
+        "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers-short": "all-rivers-short",
+        "all-rivers-easy": "all-rivers-easy",
+    }
+    EXPRESSION = "fish"
+    CAPTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "captions_short.json")
+    _captions = None # lazy-loaded cache
+
+    @classmethod
+    def _load_captions(cls):
+        if cls._captions is None:
+            with open(cls.CAPTIONS_PATH, 'r') as f:
+                cls._captions = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded {len(cls._captions)} captions")
+        return cls._captions
+
+    @classmethod
+    def _prepend_prompt(cls, video_id):
+        captions = cls._load_captions()
+        caption = captions.get(video_id).get("caption")
+        if caption is None:
+            log.warning(f"[{cls.DATASET_NAME}] No caption for {video_id}")
+            return ""
+        return caption
+
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations):
+        # Reuse CFC's annotation builder, then add dataset-specific prepend field
+        result = CFC._build_video_annotation.__func__(cls, video_id, images, annotations)
+        result['prepend'] = result['prepend'] + cls._prepend_prompt(video_id)
+        return result
+
+
+
 class CFCMultiTurn(CFC):
     DATASET_NAME = "cfc"
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
@@ -1245,22 +1311,46 @@ class CFCMultiTurn(CFC):
         "train": "kenai-train-subsampled",
         "validation": "kenai-val",
         "sample": "val_sample",
+        "sample-short": "val_sample_short",
+        "val-short": "kenai-val-short",
+        "train-short": "kenai-train-short",
+        "val-easy": "kenai-val-easy",
+        "train-easy": "kenai-train-easy",
+        "elwha-short": "elwha-short",
+        "nushagak-short": "nushagak-short",
+        "rightbank-short": "kenai-rightbank-short",
+        "elwha-easy": "elwha-easy",
+        "nushagak-easy": "nushagak-easy",
+        "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers-short": "all-rivers-short",
+        "all-rivers-easy": "all-rivers-easy",
     }
     EXPRESSION = "fish"
+    CORRECTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "corrections_short.jsonl")
 
     def _create_message_list(self, ex):
-        """Create multi-turn message list"""
-        prompts = ex.get("prompts")
-        
+        """Create multi-turn message list from correction trajectory.
+
+        Uses 'question' key (not 'prompt') so that get_user_prompt routes through
+        format_video_object_track_points for point formatting rather than taking
+        the early-exit raw-prompt path.
+        """
+        prompts_list = ex['prompts_list']
+        points_list = ex['points_list']
         message_list = []
-        for i in range(5):
-            message_list.append(dict(
+        for i in range(len(prompts_list)):
+            msg = dict(
                 width=ex['width'],
                 height=ex['height'],
-                prompt=prompts[i],
-                points=f"This is answer number {i}.",
-                style="video_point_track_per_frame"
-            ))
+                question=prompts_list[i],
+                points=points_list[i],
+                label=ex['expression'],
+                sampling_fps=ex['sampling_fps'],
+                style="video_point_track_per_frame",
+            )
+            if i == 0:
+                msg['prepend'] = ex.get('prepend')
+            message_list.append(msg)
         return message_list
 
     def get(self, idx, rng):
@@ -1295,6 +1385,98 @@ class CFCMultiTurn(CFC):
             'metadata': metadata,
             'fps': str(ex['sampling_fps']),
             'label': ex['expression']
+        }
+
+    def load(self):
+        assert exists(self.CORRECTIONS_PATH), f"Corrections file not found: {self.CORRECTIONS_PATH}"
+        data = []
+        with open(self.CORRECTIONS_PATH) as f:
+            for line in f:
+                record = json.loads(line)
+                video_id = record['video_name']
+                images = sorted(record['images'], key=lambda x: x['id'])
+                for trajectory in record['trajectories']:
+                    example = self._build_video_annotation(
+                        video_id, images, trajectory['correction_steps'])
+                    data.append(example)
+        self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} videos for split={self.data_split}")
+        return data
+    
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, trajectory):
+        """Convert COCO images + multiple steps of annotations for one video into tracking format.
+
+        Args:
+            video_id: Video identifier string.
+            images: Sorted list of COCO image dicts for this video.
+            trajectory: List of correction_step dicts, each with 'correction_step',
+                'prompt', and 'annotations' (COCO-format bboxes without 'id' field).
+        """
+        height = images[0]['height']
+        width = images[0]['width']
+        n_frames = len(images)
+
+        # Map image_id -> frame_idx (0-based)
+        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+        n_steps = len(trajectory)
+        prompts_list = [None] * n_steps
+        points_list = [None] * n_steps
+
+        all_track_ids = set()
+        for correction_step in trajectory:
+            annotations = correction_step["annotations"]
+            track_ids = sorted({ann['track_id'] for ann in annotations})
+            all_track_ids.update(track_ids)
+            track_id_to_obj = {tid: idx for idx, tid in enumerate(track_ids)}
+
+            # Group annotations by (frame_idx, track_id) -> bbox
+            bbox_lookup = {}
+            for ann in annotations:
+                frame_idx = image_id_to_frame.get(ann['image_id'])
+                if frame_idx is None:
+                    continue
+                bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
+
+            # Build frame_trajectories with dict-format points
+            # (format expected by build_video_track_coordinates: {obj_id: {"point": ..., "occluded": ...}})
+            frame_trajectories = []
+            for frame_idx in range(n_frames):
+                points_dict = {}
+                for tid in track_ids:
+                    bbox = bbox_lookup.get((frame_idx, tid))
+                    if bbox is None:
+                        continue
+                    x, y, w, h = bbox
+                    points_dict[track_id_to_obj[tid]] = {
+                        "point": [x + w / 2, y + h / 2],
+                        "occluded": False,
+                    }
+                frame_trajectories.append({
+                    "frame": frame_idx,
+                    "time": frame_idx / cls.VIDEO_FPS,
+                    "points": points_dict,
+                })
+
+            idx = correction_step["correction_step"]
+            prompts_list[idx] = correction_step["prompt"]
+            points_list[idx] = frame_trajectories
+
+        all_track_ids = sorted(all_track_ids)
+        return {
+            "id": video_id,
+            "video": video_id,
+            "expression": cls.EXPRESSION,
+            "height": height,
+            "width": width,
+            "fps": cls.VIDEO_FPS,
+            "sampling_fps": cls.VIDEO_FPS,
+            "mask_id": [str(i) for i in range(len(all_track_ids))],
+            "obj_id": [str(i) for i in range(len(all_track_ids))],
+            "qid": video_id,
+            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
+            "prompts_list": prompts_list,
+            "points_list": points_list,
         }
 
 class SAFARI(LocalTrackingDataset):

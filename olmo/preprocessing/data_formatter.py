@@ -1509,7 +1509,7 @@ class DataFormatter(BaseConfig):
         
         # assert len(frames_data) > 0, "No frames left after filtering/sampling"
 
-        if False and "question" in example:
+        if "question" in example:
             prompt = example["question"]
         else:
             prompt_keywords = dict(label=label)
@@ -1891,6 +1891,9 @@ class DataFormatter(BaseConfig):
                 messages = []
                 # multi-turn conversations that needs to be formatted through `get_user_prompt`
                 for turn_message in message["multi_turn_messages"]:
+                    # Propagate video metadata so turn-level formatting can filter to timestamps
+                    if isinstance(message.get("video"), dict):
+                        turn_message = dict(turn_message, video=message["video"])
                     prompt, response, extra_metadata = self.get_user_prompt(
                         turn_message, is_training, for_inference=for_inference, rng=rng
                     )
