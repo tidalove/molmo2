@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 from typing_extensions import TypedDict
 import numpy as np
+import cv2
 
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
@@ -498,6 +499,19 @@ def ann_to_mask(mask_ann) -> np.ndarray:
     mask = mask_utils.decode(rle)
     return mask
 
+def dilate_mask(mask: np.ndarray, scale: float) -> np.ndarray:
+    """Dilate binary mask so linear extent grows by `scale` (1.5 = 50% bigger each direction)."""
+    if scale <= 1.0 or mask.sum() == 0:
+        return mask
+    ys, xs = np.where(mask)
+    bh = ys.max() - ys.min() + 1
+    bw = xs.max() - xs.min() + 1
+    pad_y = max(1, int(round(bh * (scale - 1) / 2)))
+    pad_x = max(1, int(round(bw * (scale - 1) / 2)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (pad_x * 2 + 1, pad_y * 2 + 1))
+    return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+
 def is_point_in_region(point: Tuple[float, float], mask: np.ndarray) -> bool:
     """
     Check if point falls within the segmentation mask region.
@@ -664,11 +678,12 @@ def load_masks_at_frame(gt_masks: Dict, frame_idx: int, height: int, width: int)
     return masks
 
 def evaluate_video_tracks_with_masks(
-    pred_tracks: List[Dict] | List[PointTrack], 
+    pred_tracks: List[Dict] | List[PointTrack],
     gt_tracks: List[Dict] | List[PointTrack],
     gt_masks: Dict[str, List],
     height: int,
-    width: int
+    width: int,
+    mask_scale: float = 1.0,
 ) -> Dict[str, float]:
     """
     Evaluate predictions for a single video.
@@ -759,7 +774,9 @@ def evaluate_video_tracks_with_masks(
                 object_ids.append(str(obj_id))
         
         masks = load_masks_at_frame(gt_masks, frame_idx, height, width)
-        
+        if mask_scale > 1.0:
+            masks = [dilate_mask(m, mask_scale) for m in masks]
+
         # Evaluate this frame
         precision, recall, f1, n_tp, n_pred, n_gt = evaluate_frame_predictions(pred_points, gt_points, masks)
         frame_metrics.append({
@@ -822,7 +839,7 @@ class HOTAMetric:
             self.alpha_thresholds = alpha_thresholds
     
     def prepare_data_for_hota(self, pred_tracks, gt_tracks, gt_masks,
-                              height, width):
+                              height, width, mask_scale=1.0):
         """
         Convert trajectory data to HOTA format.
         
@@ -897,14 +914,15 @@ class HOTAMetric:
             
             # Compute similarity matrix
             similarity = self._compute_similarity_matrix(
-                pred_points_list, gt_points_list, gt_masks, frame_idx, height, width
+                pred_points_list, gt_points_list, gt_masks, frame_idx, height, width,
+                mask_scale=mask_scale,
             )
             data['similarity_scores'].append(similarity)
         
         return data
     
-    def _compute_similarity_matrix(self, pred_points, gt_points, gt_masks, frame_idx, 
-                                   height, width):
+    def _compute_similarity_matrix(self, pred_points, gt_points, gt_masks, frame_idx,
+                                   height, width, mask_scale=1.0):
         """
         Compute similarity between predictions and GT for one frame.
         Similarity = 1 if point in mask, 0 otherwise.
@@ -917,7 +935,9 @@ class HOTAMetric:
         
         # Load masks for this frame
         masks = load_masks_at_frame(gt_masks, frame_idx, height, width)
-        
+        if mask_scale > 1.0:
+            masks = [dilate_mask(m, mask_scale) for m in masks]
+
         similarity = np.zeros((len(gt_points), len(pred_points)))
         
         for i, (gt_point, mask) in enumerate(zip(gt_points, masks)):
@@ -1048,20 +1068,21 @@ def evaluate_video_object_tracking(
     gt_tracks: List[Dict],
     gt_masks: Dict,
     height: int,
-    width: int
+    width: int,
+    mask_scale: float = 1.0,
 ) -> Dict[str, float]:
     """
     Evaluate predictions with both spatial metrics (P/R/F1) and tracking metrics (HOTA).
     """
     # Compute existing spatial metrics
     spatial_metrics = evaluate_video_tracks_with_masks(
-        pred_tracks, gt_tracks, gt_masks, height, width
+        pred_tracks, gt_tracks, gt_masks, height, width, mask_scale=mask_scale,
     )
-    
+
     # Compute HOTA tracking metrics
     hota_metric = HOTAMetric()
-    hota_data = hota_metric.prepare_data_for_hota(pred_tracks, gt_tracks, gt_masks, 
-                                                  height, width)
+    hota_data = hota_metric.prepare_data_for_hota(pred_tracks, gt_tracks, gt_masks,
+                                                  height, width, mask_scale=mask_scale)
     hota_results = hota_metric.compute_hota(hota_data)
     
     # Combine results (use alpha=0.5 threshold for main metrics)

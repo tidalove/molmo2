@@ -2222,7 +2222,7 @@ class VideoObjectTrackingEval(Evaluator):
     def __init__(self, n_to_log=None):
         self.n_to_log = n_to_log
 
-    def __call__(self, metadatas, predictions, tokenizer, step=None):
+    def __call__(self, metadatas, predictions, tokenizer, step=None, mask_scale=1.0):
         new_tokens = predictions["predictions"]
         vocab = tokenizer
 
@@ -2274,7 +2274,8 @@ class VideoObjectTrackingEval(Evaluator):
                 gt_tracks,
                 gt_masks,
                 height,
-                width
+                width,
+                mask_scale=mask_scale,
             )
             # Add to score lists
             scores["precision"].append(video_metrics['precision'])
