@@ -64,6 +64,9 @@ def get_prompt_text(style, prompt_override, example=None):
     if example and 'message_list' in example:
         msg = example['message_list'][0]
         return build_prompt_for_inference(msg)
+    if example and 'multi_turn_messages' in example:
+        msg = example['multi_turn_messages'][0]
+        return build_prompt_for_inference(msg)
     if example and 'question' in example:
         return example['question']
     raise ValueError("No prompt source: provide --style or --prompt")
@@ -104,8 +107,11 @@ def build_hf_input(example, style, prompt_override, processor, max_fps_override=
 
     # Determine style for chat template
     effective_style = style
-    if not effective_style and raw and 'message_list' in raw:
-        effective_style = raw['message_list'][0].get('style', 'demo')
+    if not effective_style and raw:
+        if 'message_list' in raw:
+            effective_style = raw['message_list'][0].get('style', 'demo')
+        elif 'multi_turn_messages' in raw:
+            effective_style = raw['multi_turn_messages'][0].get('style', 'demo')
     if not effective_style:
         effective_style = 'demo'
 
@@ -163,6 +169,21 @@ def collect_metadata(example):
         for k, v in meta.items():
             if isinstance(v, (str, int, float, bool)):
                 result[k] = v
+        # For multi-turn datasets, include the full conversation history
+        # so predictions.json shows all prior turns (prompts + simulated model answers)
+        if 'multi_turn_messages' in raw:
+            turns = raw['multi_turn_messages']
+            history = []
+            for i, turn in enumerate(turns):
+                # Each turn dict has 'question' (the prompt text) and 'points' (tracking data)
+                text = turn.get('question', turn.get('prompt', ''))
+                entry = {"turn": i, "prompt": text}
+                if turn.get('points'):
+                    n_frames = len(turn['points'])
+                    n_points = sum(len(f.get('points', {})) for f in turn['points'])
+                    entry["points_summary"] = f"{n_points} points across {n_frames} frames"
+                history.append(entry)
+            result["conversation_history"] = history
     return result
 
 
