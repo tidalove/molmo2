@@ -48,7 +48,24 @@ class IterableDataMixtureCheckpoint:
     next_worker_id: int = 0
 
     def __post_init__(self):
-        assert len(self.worker_states) == (self.world_size*self.num_workers)
+        expected = self.world_size * self.num_workers
+        if len(self.worker_states) != expected:
+            # PyTorch DataLoader with IterableDataset dispatches entire batches to
+            # individual workers (auto_collation). Workers cycle round-robin across
+            # batches, so if fewer than num_workers batches were consumed (e.g. short
+            # training runs), some workers will never have reported state.
+            present_ids = sorted(s.worker_global_id for s in self.worker_states)
+            log.warning(
+                f"Expected {expected} worker states "
+                f"(world_size={self.world_size}, num_workers={self.num_workers}), "
+                f"but got {len(self.worker_states)}. "
+                f"Worker IDs present: {present_ids}. "
+                f"Data checkpoint will be incomplete -- some examples may repeat on resume."
+            )
+            present_set = set(present_ids)
+            for wid in range(expected):
+                if wid not in present_set:
+                    self.worker_states.append(WorkerState(wid, -1, []))
         self.worker_states = sorted(self.worker_states, key=lambda x: x.worker_global_id)
         assert [x.worker_global_id for x in self.worker_states] == list(range(len(self.worker_states)))
 
