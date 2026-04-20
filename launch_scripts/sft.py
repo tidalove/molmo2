@@ -175,7 +175,8 @@ TRACKING_MIXTURE = [
 INDIVIDUAL_DATASETS = {
     "cfc_track": "tracking",
     "panaf_track": "tracking",
-    "cfc_multi": "tracking"
+    "cfc_multi": "tracking",
+    "cfc_guided": "tracking"
 }
 
 
@@ -488,6 +489,8 @@ def main():
     parser.add_argument("mixture", default="0.0.1")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--model", default="video")
+    parser.add_argument("--train_split", default="train")
+    parser.add_argument("--val_split", default="validation")
     parser.add_argument("--seq_len", type=int, default=16384)
     parser.add_argument("--device_batch_size", default=2, type=int)
     parser.add_argument("--max_loss_examples", default=64, type=int)
@@ -529,7 +532,7 @@ def main():
             "vixmo_points_count:val"
         ]
     elif args.mixture in INDIVIDUAL_DATASETS:
-        loss_eval_tasks = [f'{args.mixture}:validation']
+        loss_eval_tasks = [f'{args.mixture}:{args.val_split}']
         eval_tasks=[]
     else:
         loss_eval_tasks = []
@@ -568,7 +571,7 @@ def main():
         evaluation = get_evaluation(
             task,
             None,
-            device_batch_size=args.device_batch_size*2,
+            device_batch_size=args.device_batch_size,
             max_examples=args.max_inf_eval_examples,
             num_workers=num_workers,
         )
@@ -584,7 +587,7 @@ def main():
             task,
             seq_len=seq_len,
             for_inference=False,
-            device_batch_size=args.device_batch_size*2,
+            device_batch_size=args.device_batch_size,
             max_examples=args.max_loss_examples,
             num_workers=num_workers,
         )
@@ -618,7 +621,7 @@ def main():
         data=DataLoaderConfig(
             kwargs_mixture=training_mixture,
             shuffle=True,
-            split="train",
+            split=args.train_split, # "train" by default
             drop_last=True,
             sequence_length=seq_len,
             max_text_seq_len=None,
@@ -652,12 +655,12 @@ def main():
         fsdp=FSDPConfig(fsdp2=True),
         load_path=None,
         initial_model_checkpoint=checkpoint,
-        save_interval=20,
+        save_interval=50,
         save_num_checkpoints_to_keep=5,
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
-        max_duration=1, # KAIDEBUG
+        max_duration=100,
         stop_at="${max_duration}",
         max_grad_norm=1,
         batch_divisor=BatchDivisor.global_batch,
@@ -670,7 +673,7 @@ def main():
         inf_evaluators=evaluations,
         evaluators=loss_evaluations,
         inf_eval_interval=-1,
-        eval_interval=1, # KAIDEBUG
+        eval_interval=20,
         save_final_unsharded_checkpoint=True,
         save_final_optim=True,
         response_logits_only=True,
