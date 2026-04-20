@@ -5,7 +5,6 @@ from typing import Optional, Any, List, Union, Dict
 import numpy as np
 from olmo.config import BaseConfig
 
-from olmo import tokenizer
 from olmo.models.molmo_point.molmo_point_data_formatter import Message
 from olmo.preprocessing.text_preprocessor import MessageWeight, build_subsegment_pos_ids
 
@@ -52,14 +51,80 @@ class MolmoPointInterleavedTextPreprocessor:
     max_answer_len: int = None
     default_message_weight: Optional[MessageWeight] = dataclasses.field(default_factory=MessageWeight)
 
+    def get_first_token_mask(self, message_ids, weight=10.):
+        """Upweight the first-appearance group of each track ID.
+
+        Expects `no_space_id_last` format where each group is:
+            <|token_index|> <|vit_index|> <|vit_loc|>? ID-digits
+        A trailing bare <|token_index|> (from `_end_with_patch=True`) has no
+        following ID and is ignored.
+        """
+        message_ids = np.array(message_ids)
+        mask = np.ones(len(message_ids), dtype=np.float32)
+
+        ti_id = self.tokenizer.token_index_token_id
+        si_id = self.tokenizer.subpatch_index_token_id
+        loc_id = self.tokenizer.subpatch_loc_token_id
+        specials = {ti_id, si_id, loc_id,
+                    self.tokenizer.eos_token_id, self.tokenizer.bos_token_id}
+
+        ti_positions = np.where(message_ids == ti_id)[0]
+        if len(ti_positions) == 0:
+            return mask
+
+        seen = set()
+        for ti_pos in ti_positions:
+            pos = int(ti_pos) + 1
+            group_special_end = int(ti_pos)
+            if pos < len(message_ids) and int(message_ids[pos]) == si_id:
+                group_special_end = pos
+                pos += 1
+            if pos < len(message_ids) and int(message_ids[pos]) == loc_id:
+                group_special_end = pos
+                pos += 1
+
+            id_positions = []
+            while pos < len(message_ids):
+                tok = int(message_ids[pos])
+                if tok in specials:
+                    break
+                decoded = self.tokenizer.decode([tok], truncate_at_eos=False).strip()
+                if not decoded or not all(c.isdigit() for c in decoded):
+                    break
+                id_positions.append(pos)
+                pos += 1
+
+            if not id_positions:
+                continue
+
+            try:
+                track_id = int(self.tokenizer.decode(
+                    [int(message_ids[p]) for p in id_positions],
+                    truncate_at_eos=False,
+                ).strip())
+            except ValueError:
+                continue
+
+            if track_id in seen:
+                continue
+            seen.add(track_id)
+            for p in range(int(ti_pos), group_special_end + 1):
+                mask[p] += weight
+            for p in id_positions:
+                mask[p] += weight
+
+        return mask
+
     def tokenize_message(self, message_list: List[Message], weight, bos=True, add_last_eos=True):
         if bos:
             bos = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
             text_token_ids = [bos]
             loss_mask = [0.0]
+            first_token_weight = [1.0]
         else:
             text_token_ids = []
             loss_mask = []
+            first_token_weight = []
 
         point_target_ids = []
         for msg_ix, message in enumerate(message_list):
@@ -81,15 +146,24 @@ class MolmoPointInterleavedTextPreprocessor:
 
             has_loss = is_model and (
                 not self.last_message_loss_only or (msg_ix == (len(message_list) - 1)))
+
+            if has_loss:
+                msg_ftw = np.ones(len(message_ids), dtype=np.float32) # self.get_first_token_mask(message_ids)
+            else:
+                msg_ftw = np.ones(len(message_ids), dtype=np.float32)
+
+            first_token_weight += list(msg_ftw)
             loss_mask += [has_loss] * len(message_ids)
             text_token_ids += message_ids
         text_token_ids = np.array(text_token_ids)
         loss_mask = np.array(loss_mask, dtype=np.float32)
+        first_token_weight = np.array(first_token_weight, dtype=np.float32)
         if weight.root_length:
             if loss_mask.sum() > 0:
                 loss_mask *= 2 / np.sqrt(loss_mask.sum())
         if weight.weight is not None:
             loss_mask *= weight.weight
+        loss_mask *= first_token_weight
         point_target_ids = np.concatenate(point_target_ids) if point_target_ids else None
         return text_token_ids, loss_mask, point_target_ids
 
