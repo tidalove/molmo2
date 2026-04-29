@@ -64,6 +64,7 @@ import multiprocessing as mp
 from typing import List, Dict, Optional
 from typing_extensions import TypedDict
 from tqdm import tqdm
+import shutil
 import subprocess
 import re
 from huggingface_hub import snapshot_download, hf_hub_download
@@ -710,14 +711,15 @@ class LocalTrackingDataset(TrackingDataset):
         }
 
         if self.is_eval:
-            masks_path = join(self.VIDEO_HOME, "MasksRLE", f"{ex['video']}.json")
+            if "points" in item['message_list'][0]:
+                item['metadata']['points'] = item['message_list'][0]['points']
+            item['metadata']['mask_id'] = ex['mask_id']
+            masks_path = join(self.VIDEO_HOME, "MasksRLE", ex['video'], f"{ex.get('qid', '0')}.json")
             if exists(masks_path):
                 with open(masks_path, 'r') as f:
-                    masks = json.load(f)
-                item['metadata']['masks'] = masks
-                item['metadata']['mask_id'] = ex['mask_id']
-                if "points" in item['message_list'][0]:
-                    item['metadata']['points'] = item['message_list'][0]['points']
+                    item['metadata']['masks'] = json.load(f)
+            else:
+                item['metadata']['masks'] = {}
 
         return item
 
@@ -1061,6 +1063,7 @@ class CFC(LocalTrackingDataset):
         "elwha-easy": "elwha-easy",
         "nushagak-easy": "nushagak-easy",
         "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
     }
@@ -1087,7 +1090,7 @@ class CFC(LocalTrackingDataset):
         # Build one example per video
         data = []
         for video_id, images in sorted(images_by_video.items()):
-            images = sorted(images, key=lambda x: x['file_name'][x['file_name'].rfind('_'):x['file_name'].rfind('.')])
+            images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
             video_annots = []
             for img in images:
                 video_annots.extend(annots_by_image.get(img['id'], []))
@@ -1173,22 +1176,37 @@ class CFC(LocalTrackingDataset):
             "mask_id": [str(i) for i in range(len(fish_ids))],
             "obj_id": [str(i) for i in range(len(fish_ids))],
             "anno_id": anno_ids,
-            "qid": video_id,
+            "qid": "0",
             "frame_trajectories": frame_trajectories,
             "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
         }
-    
+
+    @classmethod
+    def _migrate_legacy_masks(cls):
+        """Move any legacy MasksRLE/{video_id}.json into MasksRLE/{video_id}/0.json."""
+        base = join(cls.VIDEO_HOME, "MasksRLE")
+        if not exists(base):
+            return
+        legacy_files = glob(join(base, "*.json"))
+        for legacy in legacy_files:
+            vid = os.path.splitext(os.path.basename(legacy))[0]
+            new_dir = join(base, vid)
+            os.makedirs(new_dir, exist_ok=True)
+            shutil.move(legacy, join(new_dir, "0.json"))
+        if legacy_files:
+            log.info(f"[{cls.DATASET_NAME}] Migrated {len(legacy_files)} legacy mask files to per-video dirs.")
+
     @classmethod
     def _precompute_gt_masks_for_split(cls, data_split):
         """Convert bbox annotations to RLE masks and save per-video JSON.
 
-        Saves to: VIDEO_HOME/MasksRLE/{video_id}.json
+        Saves to: VIDEO_HOME/MasksRLE/{video_id}/0.json
         Format: {mask_idx: [rle_or_none_per_frame, ...], ...}
         """
-        coco = cls._load_coco_json(data_split)
-        image_by_id = {img['id']: img for img in coco['images']}
+        cls._migrate_legacy_masks()
 
-        # Group images and annotations by video (derive video_id from filename)
+        coco = cls._load_coco_json(data_split)
+
         images_by_video = {}
         for img in coco['images']:
             vid = img['file_name'][:img['file_name'].rfind('_')]
@@ -1197,37 +1215,36 @@ class CFC(LocalTrackingDataset):
         for ann in coco['annotations']:
             annots_by_image.setdefault(ann['image_id'], []).append(ann)
 
-        output_dir = join(cls.VIDEO_HOME, "MasksRLE")
-        os.makedirs(output_dir, exist_ok=True)
+        output_base = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_base, exist_ok=True)
 
         n_encoded = 0
         n_skipped = 0
         for video_id, images in tqdm(sorted(images_by_video.items()),
                                      desc=f"Encoding GT masks ({data_split})"):
-            output_path = join(output_dir, f"{video_id}.json")
+            video_out_dir = join(output_base, video_id)
+            output_path = join(video_out_dir, "0.json")
             if exists(output_path):
                 n_skipped += 1
                 continue
+            os.makedirs(video_out_dir, exist_ok=True)
 
-            images = sorted(images, key=lambda x: x['file_name'][x['file_name'].rfind('_'):x['file_name'].rfind('.')])
+            images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
             height, width = images[0]['height'], images[0]['width']
             n_frames = len(images)
             image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
 
-            # Collect all annotations for this video
             video_annots = []
             for img in images:
                 video_annots.extend(annots_by_image.get(img['id'], []))
             fish_ids = sorted({ann['track_id'] for ann in video_annots})
 
-            # Group by (frame_idx, track_id) -> bbox
             bbox_lookup = {}
             for ann in video_annots:
                 frame_idx = image_id_to_frame.get(ann['image_id'])
                 if frame_idx is not None:
                     bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
 
-            # Build mask_annot: {mask_idx: [rle_or_none per frame]}
             mask_annot = {}
             for obj_idx, fish_id in enumerate(fish_ids):
                 frame_masks = []
@@ -1246,6 +1263,441 @@ class CFC(LocalTrackingDataset):
         log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
                  f"{n_encoded} new, {n_skipped} already exist, "
                  f"out of {len(images_by_video)} videos.")
+
+
+class CFCTargetedInference(CFC):
+    """CFC with multiple queries per video, with different sets of tracks as ground truth.
+
+    Each query has a qid, a natural-language expression, and a target_ids subset of
+    track_ids that form the ground truth. One example per query, plus a default
+    "track all fish" example (qid=0) per video.
+    """
+    DATASET_NAME = "cfc_target"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
+    TASKS = ['track']
+    VIDEO_FPS = 6
+    SPLIT_MAP = {
+        "train": "kenai-train-subsampled",
+        "validation": "kenai-val",
+        "sample": "val_sample",
+        "sample-short": "val_sample_short",
+        "val-short": "kenai-val-short",
+        "train-short": "kenai-train-short",
+        "val-easy": "kenai-val-easy",
+        "train-easy": "kenai-train-easy",
+        "elwha-short": "elwha-short",
+        "nushagak-short": "nushagak-short",
+        "rightbank-short": "kenai-rightbank-short",
+        "elwha-easy": "elwha-easy",
+        "nushagak-easy": "nushagak-easy",
+        "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers": "all-rivers",
+        "all-rivers-short": "all-rivers-short",
+        "all-rivers-easy": "all-rivers-easy",
+    }
+    QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "queries.json")
+    _queries = None  # lazy-loaded cache
+
+    @classmethod
+    def _load_queries(cls):
+        if cls._queries is None:
+            assert exists(cls.QUERIES_PATH), f"Queries file not found: {cls.QUERIES_PATH}"
+            with open(cls.QUERIES_PATH, 'r') as f:
+                cls._queries = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded queries for {len(cls._queries)} videos")
+        return cls._queries
+
+    def load(self):
+        coco = self._load_coco_json(self.data_split)
+        queries = self._load_queries()
+
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['file_name'][:img['file_name'].rfind('_')], []).append(img)
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        data = []
+        for video_id, images in sorted(images_by_video.items()):
+            images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+
+            # default qid=0 "track all fish"
+            data.append(self._build_video_annotation(video_id, images, video_annots, qid=0))
+
+            for q in queries.get(video_id, []):
+                data.append(self._build_video_annotation(
+                    video_id, images, video_annots,
+                    qid=q['qid'], expression=q['expression'], target_ids=q['target_ids']))
+
+        self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} examples for split={self.data_split}")
+        return data
+
+    @classmethod
+    def _build_video_annotation(cls, video_id, images, annotations, qid=0, expression=None, target_ids=None):
+        """Build a single query example for a CFC video.
+
+        Args:
+            video_id: Video identifier string.
+            images: Sorted list of COCO image dicts for this video.
+            annotations: List of ALL COCO annotation dicts for this video
+                (ground truth is filtered by target_ids below).
+            qid: Query id (0 is reserved for the default "all fish" query).
+            expression: Natural-language prompt for the query. Defaults to cls.EXPRESSION.
+            target_ids: Subset of track_ids that form the query's ground truth.
+                None means use all track_ids in the video.
+        """
+        height = images[0]['height']
+        width = images[0]['width']
+        n_frames = len(images)
+        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+        if target_ids is None:
+            fish_ids = sorted({ann['track_id'] for ann in annotations})
+        else:
+            fish_ids = sorted(target_ids)
+
+        # anno_id: "{min_annotation_id:06d}_{fish_id}" — derived from full video's
+        # annotations so the same fish has the same anno_id across queries.
+        min_ann_id = min(ann['id'] for ann in annotations) if annotations else 0
+        anno_ids = [f"{min_ann_id:06d}_{fid}" for fid in fish_ids]
+        fish_id_to_obj = {fid: idx for idx, fid in enumerate(fish_ids)}
+
+        bbox_lookup = {}
+        for ann in annotations:
+            frame_idx = image_id_to_frame.get(ann['image_id'])
+            if frame_idx is None:
+                continue
+            bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
+
+        frame_trajectories = []
+        for frame_idx in range(n_frames):
+            points = []
+            for fid in fish_ids:
+                bbox = bbox_lookup.get((frame_idx, fid))
+                if bbox is None:
+                    continue
+                x, y, w, h = bbox
+                points.append({
+                    "id": fish_id_to_obj[fid],
+                    "point": [x + w / 2, y + h / 2],
+                    "occluded": False,
+                })
+            frame_trajectories.append({
+                "frame": frame_idx,
+                "time": frame_idx / cls.VIDEO_FPS,
+                "points": points,
+            })
+
+        qid_str = str(qid)
+        return {
+            "id": f"{video_id}__{qid_str}",
+            "video": video_id,
+            "expression": cls.EXPRESSION if expression is None else expression,
+            "height": height,
+            "width": width,
+            "fps": cls.VIDEO_FPS,
+            "sampling_fps": cls.VIDEO_FPS,
+            "mask_id": [str(i) for i in range(len(fish_ids))],
+            "obj_id": [str(i) for i in range(len(fish_ids))],
+            "anno_id": anno_ids,
+            "qid": qid_str,
+            "frame_trajectories": frame_trajectories,
+            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
+        }
+
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """Convert bbox annotations to RLE masks, one JSON per (video_id, qid).
+
+        Saves to: VIDEO_HOME/MasksRLE/{video_id}/{qid}.json
+        Includes qid=0 ("track all fish") plus one file per targeted query.
+        """
+        cls._migrate_legacy_masks()
+
+        coco = cls._load_coco_json(data_split)
+        queries = cls._load_queries()
+
+        images_by_video = {}
+        for img in coco['images']:
+            vid = img['file_name'][:img['file_name'].rfind('_')]
+            images_by_video.setdefault(vid, []).append(img)
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        output_base = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_base, exist_ok=True)
+
+        n_encoded = 0
+        n_skipped = 0
+        for video_id, images in tqdm(sorted(images_by_video.items()),
+                                     desc=f"Encoding GT masks ({data_split})"):
+            images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
+            height, width = images[0]['height'], images[0]['width']
+            n_frames = len(images)
+            image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+            all_fish_ids = sorted({ann['track_id'] for ann in video_annots})
+
+            bbox_lookup = {}
+            for ann in video_annots:
+                frame_idx = image_id_to_frame.get(ann['image_id'])
+                if frame_idx is not None:
+                    bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
+
+            video_out_dir = join(output_base, video_id)
+            os.makedirs(video_out_dir, exist_ok=True)
+
+            query_list = [("0", all_fish_ids)]
+            for q in queries.get(video_id, []):
+                query_list.append((str(q['qid']), sorted(q['target_ids'])))
+
+            for qid_str, fish_ids in query_list:
+                out_path = join(video_out_dir, f"{qid_str}.json")
+                if exists(out_path):
+                    n_skipped += 1
+                    continue
+                mask_annot = {}
+                for obj_idx, fid in enumerate(fish_ids):
+                    frame_masks = []
+                    for frame_idx in range(n_frames):
+                        bbox = bbox_lookup.get((frame_idx, fid))
+                        if bbox is None:
+                            frame_masks.append(None)
+                        else:
+                            frame_masks.append(cls._bbox_to_rle(bbox, height, width))
+                    mask_annot[obj_idx] = frame_masks
+                with open(out_path, 'w') as f:
+                    json.dump(mask_annot, f)
+                n_encoded += 1
+
+        log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
+                 f"{n_encoded} new, {n_skipped} already exist.")
+
+class CFCTargetedTrain(CFC):
+    """CFC with multiple queries per video, with different sets of tracks as ground truth.
+
+    Each query has a qid, a natural-language expression, and a target_ids subset of
+    track_ids that form the ground truth. One example per video - uses message trees to
+    train on all queries simultaneously for the same video's mm_data, for higher training
+    efficiency.
+    """
+    DATASET_NAME = "cfc_target"
+    VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
+    TASKS = ['track']
+    VIDEO_FPS = 6
+    SPLIT_MAP = {
+        "train": "kenai-train-subsampled",
+        "validation": "kenai-val",
+        "sample": "val_sample",
+        "sample-short": "val_sample_short",
+        "val-short": "kenai-val-short",
+        "train-short": "kenai-train-short",
+        "val-easy": "kenai-val-easy",
+        "train-easy": "kenai-train-easy",
+        "elwha-short": "elwha-short",
+        "nushagak-short": "nushagak-short",
+        "rightbank-short": "kenai-rightbank-short",
+        "elwha-easy": "elwha-easy",
+        "nushagak-easy": "nushagak-easy",
+        "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers": "all-rivers",
+        "all-rivers-short": "all-rivers-short",
+        "all-rivers-easy": "all-rivers-easy",
+    }
+    QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "queries.json")
+    _queries = None  # lazy-loaded cache
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Train-only dataset: merged per-video records have no top-level
+        # mask_id/qid; bypass the eval branch in LocalTrackingDataset.get().
+        self.is_eval = False
+
+    @classmethod
+    def _load_queries(cls):
+        if cls._queries is None:
+            assert exists(cls.QUERIES_PATH), f"Queries file not found: {cls.QUERIES_PATH}"
+            with open(cls.QUERIES_PATH, 'r') as f:
+                cls._queries = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded queries for {len(cls._queries)} videos")
+        return cls._queries
+
+    def _create_message_list(self, example):
+        """ Create message list with points organized by frame. """
+        style = self._get_style()
+
+        ex_list = example.get("example_list", [example])
+        sampling_fps = example['sampling_fps']
+        prepend = example.get('prepend')
+        message_list = []
+
+        for ex in ex_list:
+
+            object_id_to_idx = {obj_id: idx for idx, obj_id in enumerate(ex['mask_id'])}
+
+            message_ex = [{
+                "style": style,
+                "label": ex['expression'],
+                "sampling_fps": sampling_fps,
+                "width": ex['width'],
+                "height": ex['height'],
+                "prepend": prepend,
+            }]
+
+            if 'frame_trajectories' in ex:
+                point_frames = []
+                for frame_data in ex['frame_trajectories']:
+                    points_out = {}
+                    for p in frame_data['points']:
+                        obj_key = str(p['id'])
+                        if obj_key in object_id_to_idx:
+                            points_out[object_id_to_idx[obj_key]] = {
+                                'point': p['point'],
+                                'occluded': p['occluded'],
+                            }
+                    point_frames.append({
+                        'frame': frame_data['frame'],
+                        'time': frame_data['time'],
+                        'points': points_out,
+                    })
+                point_frames.sort(key=lambda x: x['frame'])
+
+                message_ex[0]['points'] = point_frames or None
+
+            message_list = message_list + message_ex
+
+        return message_list
+
+    def load(self):
+        coco = self._load_coco_json(self.data_split)
+        queries = self._load_queries()
+
+        images_by_video = {}
+        for img in coco['images']:
+            images_by_video.setdefault(img['file_name'][:img['file_name'].rfind('_')], []).append(img)
+        annots_by_image = {}
+        for ann in coco['annotations']:
+            annots_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        data = []
+        for video_id, images in sorted(images_by_video.items()):
+            images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
+            video_annots = []
+            for img in images:
+                video_annots.extend(annots_by_image.get(img['id'], []))
+
+            # build a single example, including info for all queries, for each video
+            data.append(self._build_grouped_video_annotation(video_id, images, video_annots, queries.get(video_id, [])))
+
+        self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} examples for split={self.data_split}")
+        return data
+
+    @classmethod
+    def _build_grouped_video_annotation(cls, video_id, images, annotations, all_queries):
+        """Build an example for a CFC video containing info for ALL associated queries (for training).
+
+        Args:
+            video_id: Video identifier string.
+            images: Sorted list of COCO image dicts for this video.
+            annotations: List of ALL COCO annotation dicts for this video
+                (ground truth is filtered by target_ids below).
+            all_queries: List of dicts associated with this video, each with the following fields:
+                - qid: Query id (0 is reserved for the default "all fish" query).
+                - expression: Natural-language prompt for the query. Defaults to cls.EXPRESSION.
+                - target_ids: Subset of track_ids that form the query's ground truth.
+                    None means use all track_ids in the video.
+        """
+
+        if len(all_queries) == 0:
+            return cls._build_video_annotation(video_id, images, annotations)
+
+        height = images[0]['height']
+        width = images[0]['width']
+        n_frames = len(images)
+        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+        example_list = []
+
+        for query in all_queries:
+            qid = query['qid']
+            expression = query['expression']
+            target_ids = query['target_ids']
+            if target_ids is None:
+                fish_ids = sorted({ann['track_id'] for ann in annotations})
+            else:
+                fish_ids = sorted(target_ids)
+
+            # anno_id: "{min_annotation_id:06d}_{fish_id}" — derived from full video's
+            # annotations so the same fish has the same anno_id across queries.
+            min_ann_id = min(ann['id'] for ann in annotations) if annotations else 0
+            anno_ids = [f"{min_ann_id:06d}_{fid}" for fid in fish_ids]
+            fish_id_to_obj = {fid: idx for idx, fid in enumerate(fish_ids)}
+
+            bbox_lookup = {}
+            for ann in annotations:
+                frame_idx = image_id_to_frame.get(ann['image_id'])
+                if frame_idx is None:
+                    continue
+                bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
+
+            frame_trajectories = []
+            for frame_idx in range(n_frames):
+                points = []
+                for fid in fish_ids:
+                    bbox = bbox_lookup.get((frame_idx, fid))
+                    if bbox is None:
+                        continue
+                    x, y, w, h = bbox
+                    points.append({
+                        "id": fish_id_to_obj[fid],
+                        "point": [x + w / 2, y + h / 2],
+                        "occluded": False,
+                    })
+                frame_trajectories.append({
+                    "frame": frame_idx,
+                    "time": frame_idx / cls.VIDEO_FPS,
+                    "points": points,
+                })
+
+            qid_str = str(qid)
+            query_example = {
+                "id": f"{video_id}__{qid_str}",
+                "video": video_id,
+                "expression": expression,
+                "height": height,
+                "width": width,
+                "fps": cls.VIDEO_FPS,
+                "sampling_fps": cls.VIDEO_FPS,
+                "mask_id": [str(i) for i in range(len(fish_ids))],
+                "obj_id": [str(i) for i in range(len(fish_ids))],
+                "anno_id": anno_ids,
+                "qid": qid_str,
+                "frame_trajectories": frame_trajectories,
+                "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
+            }
+            example_list.append(query_example)
+
+        return {
+            "id": video_id,
+            "video": video_id,
+            "expression": cls.EXPRESSION,
+            "height": height,
+            "width": width,
+            "fps": cls.VIDEO_FPS,
+            "sampling_fps": cls.VIDEO_FPS,
+            "qid": "multi",
+            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
+            "example_list": example_list
+        }
 
 
 class CFCGuided(CFC):
@@ -1269,6 +1721,7 @@ class CFCGuided(CFC):
         "elwha-easy": "elwha-easy",
         "nushagak-easy": "nushagak-easy",
         "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
     }
@@ -1322,6 +1775,7 @@ class CFCMultiTurn(CFC):
         "elwha-easy": "elwha-easy",
         "nushagak-easy": "nushagak-easy",
         "rightbank-easy": "kenai-rightbank-easy",
+        "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
     }
@@ -1329,12 +1783,7 @@ class CFCMultiTurn(CFC):
     CORRECTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "corrections_short.jsonl")
 
     def _create_message_list(self, ex):
-        """Create multi-turn message list from correction trajectory.
-
-        Uses 'question' key (not 'prompt') so that get_user_prompt routes through
-        format_video_object_track_points for point formatting rather than taking
-        the early-exit raw-prompt path.
-        """
+        """Create multi-turn message list from correction trajectory."""
         prompts_list = ex['prompts_list']
         points_list = ex['points_list']
         message_list = []
