@@ -66,6 +66,7 @@ from olmo.torch_util import (
     get_world_size,
     move_to_device,
     peak_gpu_memory,
+    process_memory_stats,
     synchronize_flag,
     synchronize_value, get_local_world_size, clip_grad_norm, save_debug_batch, )
 from olmo.dist_util import get_dp_process_group
@@ -946,6 +947,21 @@ class Trainer:
                 metrics["System/Peak GPU Memory (MB)"] = peak_gpu_mb
             if torch.cuda.is_available():
                 metrics["System/Peak GPU Reserved (MB)"] = torch.cuda.max_memory_reserved() / 1e6
+            # Per-rank CPU memory snapshot. all_gather so we see each rank separately,
+            # since asymmetric growth (one rank balloons) is the common OOM pattern.
+            cpu = process_memory_stats()
+            world = get_world_size()
+            if dist.is_available() and dist.is_initialized() and world > 1:
+                gathered: List[Optional[Dict[str, float]]] = [None] * world
+                dist.all_gather_object(gathered, cpu)
+                for rank_i, st in enumerate(gathered):
+                    if not st:
+                        continue
+                    for k, v in st.items():
+                        metrics[f"System/{k} rank{rank_i}"] = v
+            else:
+                for k, v in cpu.items():
+                    metrics[f"System/{k}"] = v
         return metrics
 
     def log_metrics_to_console(self, prefix: str, metrics: Dict[str, float]):
@@ -1237,7 +1253,15 @@ class Trainer:
                     _dl_dt = time.monotonic() - _dl_t0
                     # Bookkeeping.
                     batch_size, seq_len = batch["input_ids"].shape
-                    log.info(f"[dataloader] Batch ready in {_dl_dt:.1f}s (seq_len={seq_len}, batch_size={batch_size})")
+                    _mem = process_memory_stats()
+                    log.info(
+                        f"[dataloader] Batch ready in {_dl_dt:.1f}s "
+                        f"(seq_len={seq_len}, batch_size={batch_size}) | "
+                        f"rss={_mem['cpu_rss_mb']:.0f}MB "
+                        f"children={_mem['cpu_children_rss_mb']:.0f}MB "
+                        f"avail={_mem['mem_available_mb']:.0f}MB "
+                        f"shm={_mem.get('shm_used_mb', 0):.0f}MB"
+                    )
                     global_batch_size = batch_size * self.dp_world_size  # assumes batch size equal across ranks
                     self.global_step += 1
                     # log.info(f"{self.global_step}")
