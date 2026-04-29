@@ -17,6 +17,7 @@ class MolmoPointTextPreprocessorConfig(BaseConfig):
     last_message_loss_only: bool = False
     max_text_tokens: Optional[str] = None
     loss_token_weighting: Optional[str] = None
+    weigh_first_token: bool = False
 
     def build_text_preprocessor(self, tokenizer, max_seq_len):
         if self.loss_token_weighting == "root_subsegments":
@@ -33,7 +34,8 @@ class MolmoPointTextPreprocessorConfig(BaseConfig):
             max_seq_len,
             self.last_message_loss_only,
             self.max_answer_len,
-            default_message_weight=weighting
+            default_message_weight=weighting,
+            weigh_first_token=self.weigh_first_token
         )
 
 
@@ -50,8 +52,9 @@ class MolmoPointInterleavedTextPreprocessor:
     last_message_loss_only: bool = False
     max_answer_len: int = None
     default_message_weight: Optional[MessageWeight] = dataclasses.field(default_factory=MessageWeight)
+    weigh_first_token: bool = False
 
-    def get_first_token_mask(self, message_ids, weight=10.):
+    def get_first_token_mask(self, message_ids, weight=50.):
         """Upweight the first-appearance group of each track ID.
 
         Expects `no_space_id_last` format where each group is:
@@ -147,8 +150,8 @@ class MolmoPointInterleavedTextPreprocessor:
             has_loss = is_model and (
                 not self.last_message_loss_only or (msg_ix == (len(message_list) - 1)))
 
-            if has_loss:
-                msg_ftw = np.ones(len(message_ids), dtype=np.float32) # self.get_first_token_mask(message_ids)
+            if has_loss and self.weigh_first_token:
+                msg_ftw = self.get_first_token_mask(message_ids)
             else:
                 msg_ftw = np.ones(len(message_ids), dtype=np.float32)
 

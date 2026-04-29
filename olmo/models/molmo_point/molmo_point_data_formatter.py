@@ -1088,6 +1088,8 @@ class MolmoPointDataFormatter(BaseConfig):
                 messages = []
                 # multi-turn conversations that needs to be formatted through `get_user_prompt`
                 for turn_message in message["multi_turn_messages"]:
+                    if hasattr(video, "timestamps"):
+                        turn_message["video"] = {"timestamps": video.timestamps, "target_fps": video.target_fps}
                     prompt, response, extra_metadata = self.get_user_prompt(
                         turn_message, is_training, for_inference=for_inference, rng=rng,
                         points_to_indices=points_to_indices
