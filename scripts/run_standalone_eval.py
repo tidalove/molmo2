@@ -20,95 +20,84 @@ MASK_SCALES = [("strict", 1.0), ("lenient_1.5x", 1.5), ("lenient_2x", 2.0)]
 CFC_VIDEO_FPS = 6
 
 
-def build_metadata_from_gt_json(gt_json_path, data_dir, video_fps=CFC_VIDEO_FPS):
-    """Build per-video metadata from a COCO annotation JSON + precomputed MasksRLE.
+def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS):
+    """Build per-(video, qid) metadata directly from precomputed MasksRLE files.
 
-    This bypasses the dataset class, allowing eval on any split as long as
-    the COCO JSON and MasksRLE files exist.
+    Walks {masks_dir}/{video_id}/{qid}.json. For each (video, qid), derives
+    GT points by computing bbox centroids from each RLE mask. No COCO JSON
+    or queries.json needed — masks are pre-grouped per qid.
 
     Returns:
-        metadata_by_id: {video_id: metadata_dict}
+        metadata_by_id: dict keyed by composite "{video_id}__{qid}". Also
+        aliased to plain video_id when qid=="0", for backward compat with
+        legacy CFC predictions that key on bare video_id.
     """
-    from olmo.data.academic_video_track_datasets import TrackingDataset
-
-    with open(gt_json_path) as f:
-        coco = json.load(f)
-
-    # Group images by video
-    images_by_video = {}
-    for img in coco['images']:
-        vid = img['file_name'][:img['file_name'].rfind('_')]
-        images_by_video.setdefault(vid, []).append(img)
-
-    # Group annotations by image_id
-    annots_by_image = {}
-    for ann in coco['annotations']:
-        annots_by_image.setdefault(ann['image_id'], []).append(ann)
-
-    masks_dir = join(data_dir, "MasksRLE")
+    from glob import glob as _glob
+    from pycocotools import mask as mask_utils
 
     metadata_by_id = {}
-    for video_id, images in sorted(images_by_video.items()):
-        # Sort images by frame index (last number before .jpg)
-        images = sorted(images, key=lambda x: int(x['file_name'].replace('.jpg', '').rsplit('_', 1)[-1]))
-        height, width = images[0]['height'], images[0]['width']
-        n_frames = len(images)
-        image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+    n_skipped = 0
+    video_dirs = sorted([d for d in _glob(join(masks_dir, "*")) if os.path.isdir(d)])
 
-        # Collect annotations for this video
-        video_annots = []
-        for img in images:
-            video_annots.extend(annots_by_image.get(img['id'], []))
-
-        fish_ids = sorted({ann['track_id'] for ann in video_annots})
-        fish_id_to_obj = {fish_id: idx for idx, fish_id in enumerate(fish_ids)}
-
-        # Build GT points (PointTrack format)
-        bbox_lookup = {}
-        for ann in video_annots:
-            frame_idx = image_id_to_frame.get(ann['image_id'])
-            if frame_idx is not None:
-                bbox_lookup[(frame_idx, ann['track_id'])] = ann['bbox']
-
-        points = []
-        for frame_idx in range(n_frames):
-            frame_points = {}
-            for fish_id in fish_ids:
-                bbox = bbox_lookup.get((frame_idx, fish_id))
-                if bbox is None:
-                    continue
-                x, y, bw, bh = bbox
-                frame_points[fish_id_to_obj[fish_id]] = {
-                    'point': [x + bw / 2, y + bh / 2],
-                    'occluded': False,
-                }
-            points.append({
-                'frame': frame_idx,
-                'time': frame_idx / video_fps,
-                'points': frame_points,
-            })
-
-        # Load precomputed masks
-        masks_path = join(masks_dir, f"{video_id}.json")
-        masks = {}
-        if exists(masks_path):
-            with open(masks_path) as f:
+    for vdir in video_dirs:
+        video_id = os.path.basename(vdir)
+        for mask_file in sorted(_glob(join(vdir, "*.json"))):
+            qid = os.path.splitext(os.path.basename(mask_file))[0]
+            with open(mask_file) as f:
                 masks = json.load(f)
-        else:
-            log.warning(f"No MasksRLE for {video_id}, mask-based metrics will be zero")
 
-        metadata_by_id[video_id] = {
-            'example_id': video_id,
-            'w': width,
-            'h': height,
-            'video_fps': video_fps,
-            'video': video_id,
-            'points': points,
-            'masks': masks,
-            'mask_id': [str(i) for i in range(len(fish_ids))],
-        }
+            # Find a sample non-None RLE for h/w
+            sample_rle = None
+            for frame_list in masks.values():
+                for rle in frame_list:
+                    if rle is not None:
+                        sample_rle = rle
+                        break
+                if sample_rle is not None:
+                    break
+            if sample_rle is None:
+                n_skipped += 1
+                continue
 
-    log.info(f"Built metadata for {len(metadata_by_id)} videos from {gt_json_path}")
+            height, width = sample_rle['size']
+            n_frames = len(next(iter(masks.values())))
+
+            points = []
+            for frame_idx in range(n_frames):
+                frame_points = {}
+                for mask_idx_str, frame_list in masks.items():
+                    rle = frame_list[frame_idx]
+                    if rle is None:
+                        continue
+                    bx, by, bw, bh = mask_utils.toBbox(rle).tolist()
+                    frame_points[int(mask_idx_str)] = {
+                        'point': [bx + bw / 2, by + bh / 2],
+                        'occluded': False,
+                    }
+                points.append({
+                    'frame': frame_idx,
+                    'time': frame_idx / video_fps,
+                    'points': frame_points,
+                })
+
+            example_id = f"{video_id}__{qid}"
+            entry = {
+                'example_id': example_id,
+                'w': width,
+                'h': height,
+                'video_fps': video_fps,
+                'video': video_id,
+                'points': points,
+                'masks': masks,
+                'mask_id': [str(i) for i in range(len(masks))],
+            }
+            metadata_by_id[example_id] = entry
+            if qid == "0":
+                # Alias for legacy CFC predictions keyed by bare video_id
+                metadata_by_id[video_id] = entry
+
+    log.info(f"Built metadata for {len(metadata_by_id)} entries from {masks_dir} "
+             f"({n_skipped} mask files skipped — all-None)")
     return metadata_by_id
 
 
@@ -190,7 +179,7 @@ def compute_count_metrics(matched_metadatas, matched_preds):
     return metrics
 
 
-def run_eval(predictions_path, task, split="test", overwrite=False, gt_json=None, data_dir=None):
+def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=None):
     """Run evaluation on a predictions file. Returns and writes resolved metrics dict."""
 
     # 1. Load predictions
@@ -208,9 +197,10 @@ def run_eval(predictions_path, task, split="test", overwrite=False, gt_json=None
         log.warning(f"No evaluators for task {task}, skipping")
         return {}
 
-    # 3. Build metadata lookup
-    if gt_json:
-        metadata_by_id = build_metadata_from_gt_json(gt_json, data_dir)
+    # 3. Build metadata lookup. --masks_dir bypasses the dataset class entirely
+    # by reading precomputed MasksRLE files directly.
+    if masks_dir:
+        metadata_by_id = build_metadata_from_masks_rle(masks_dir)
     else:
         metadata_by_id = build_metadata_from_dataset(task, split)
 
@@ -284,10 +274,10 @@ if __name__ == "__main__":
     parser.add_argument("--predictions", required=True, help="Path to predictions.json")
     parser.add_argument("--task", required=True, help="Task name (e.g. cfc_track_eval_2fps)")
     parser.add_argument("--split", default="test", help="Dataset split (default: test)")
-    parser.add_argument("--gt_json", default=None,
-                        help="COCO annotation JSON for GT (bypasses dataset class for metadata)")
-    parser.add_argument("--data_dir", default="data/video_datasets/video_track/CFC",
-                        help="Dataset root dir containing MasksRLE/ (used with --gt_json)")
+    parser.add_argument("--masks_dir", default=None,
+                        help="Path to MasksRLE/ dir. If provided, builds metadata directly from "
+                             "{video_id}/{qid}.json files (bypasses dataset class). Otherwise, "
+                             "loads dataset via --task/--split.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing metrics.json if it exists")
     args = parser.parse_args()
 
@@ -295,4 +285,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     run_eval(args.predictions, args.task, args.split, args.overwrite,
-             gt_json=args.gt_json, data_dir=args.data_dir)
+             masks_dir=args.masks_dir)
