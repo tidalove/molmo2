@@ -18,7 +18,7 @@ from olmo.data.academic_video_datasets import (
     TVQA, NeXTQA, CharadesSTA
 )
 from olmo.data.academic_video_track_datasets import (
-    PanAf, PanAfICL, PanAfGuided, CFC, CFCMultiTurn, CFCGuided,
+    PanAf, PanAfICL, PanAfGuided, CFC, CFCMultiTurn, CFCGuided, CFCTargetedInference, CFCTargetedTrain,
     Mevis, MevisCaption, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
     LVVIS, YTVIS, ViCaS, ReVOS, MoCA,
     LVOSv1, LVOSv2, LaSOT, UWCOT, WebUOT, LaTOT, TNL2K, TNLLT,
@@ -437,6 +437,10 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         return CFC(split=split, task="track", sampling_fps=1)
     if dataset_name == "cfc_track_eval_2fps":
         return CFC(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_target_track_eval_2fps":
+        return CFCTargetedInference(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_target":
+        return CFCTargetedTrain(split=split, task="track", sampling_fps=2)
     if dataset_name == "cfc_guided":
         return CFCGuided(split=split, task="track")
     if dataset_name == "cfc_guided_track_eval_2fps":
