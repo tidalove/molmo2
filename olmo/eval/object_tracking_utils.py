@@ -627,6 +627,37 @@ def evaluate_frame_predictions(pred_points: List[Tuple[float, float]],
 
     return precision, recall, f1, n_tp, n_pred, n_gt
 
+def load_mask_for_object(gt_masks: Dict, object_id, frame_idx: int,
+                         height: int, width: int) -> np.ndarray:
+    """Return the binary mask for one object at one frame.
+
+    Returns an empty mask if object_id is not in gt_masks, or no annotation
+    exists at frame_idx.
+    """
+    empty_mask = np.zeros((height, width), dtype=bool)
+    mask_list = gt_masks.get(str(object_id))
+    if mask_list is None:
+        return empty_mask
+
+    first_mask = None
+    for m in mask_list:
+        if m is not None:
+            first_mask = m
+            break
+    if first_mask is None:
+        return empty_mask
+
+    if isinstance(first_mask, dict) and 'frame' in first_mask:
+        for m in mask_list:
+            if m is not None and m.get('frame') == frame_idx and m.get('mask') is not None:
+                return ann_to_mask(m['mask']).astype(bool)
+        return empty_mask
+
+    if frame_idx < len(mask_list) and mask_list[frame_idx] is not None:
+        return ann_to_mask(mask_list[frame_idx]).astype(bool)
+    return empty_mask
+
+
 def load_masks_at_frame(gt_masks: Dict, frame_idx: int, height: int, width: int) -> List[np.ndarray]:
     """
     Get all binary masks for frame from HF gt_masks.
@@ -773,7 +804,8 @@ def evaluate_video_tracks_with_masks(
                 gt_points.append(tuple(point_data['point']))
                 object_ids.append(str(obj_id))
         
-        masks = load_masks_at_frame(gt_masks, frame_idx, height, width)
+        masks = [load_mask_for_object(gt_masks, oid, frame_idx, height, width)
+                 for oid in object_ids]
         if mask_scale > 1.0:
             masks = [dilate_mask(m, mask_scale) for m in masks]
 
@@ -890,10 +922,12 @@ class HOTAMetric:
             # Get GT data
             gt_ids_list = []
             gt_points_list = []
+            gt_object_ids_list = []
             if gt_frame is not None:
                 for obj_id, point_data in sorted(gt_frame['points'].items()):
                     gt_ids_list.append(gt_id_to_idx[str(obj_id)])
                     gt_points_list.append(point_data['point'])
+                    gt_object_ids_list.append(str(obj_id))
             
             # Get prediction data
             pred_ids_list = []
@@ -914,27 +948,30 @@ class HOTAMetric:
             
             # Compute similarity matrix
             similarity = self._compute_similarity_matrix(
-                pred_points_list, gt_points_list, gt_masks, frame_idx, height, width,
+                pred_points_list, gt_points_list, gt_object_ids_list,
+                gt_masks, frame_idx, height, width,
                 mask_scale=mask_scale,
             )
             data['similarity_scores'].append(similarity)
         
         return data
     
-    def _compute_similarity_matrix(self, pred_points, gt_points, gt_masks, frame_idx,
+    def _compute_similarity_matrix(self, pred_points, gt_points, gt_object_ids,
+                                   gt_masks, frame_idx,
                                    height, width, mask_scale=1.0):
         """
         Compute similarity between predictions and GT for one frame.
         Similarity = 1 if point in mask, 0 otherwise.
-        
+
         Returns:
             similarity: (num_gt, num_pred) matrix
         """
         if len(pred_points) == 0 or len(gt_points) == 0:
             return np.zeros((len(gt_points), len(pred_points)))
-        
-        # Load masks for this frame
-        masks = load_masks_at_frame(gt_masks, frame_idx, height, width)
+
+        # Load masks for this frame, aligned with gt_points by object id
+        masks = [load_mask_for_object(gt_masks, oid, frame_idx, height, width)
+                 for oid in gt_object_ids]
         if mask_scale > 1.0:
             masks = [dilate_mask(m, mask_scale) for m in masks]
 
