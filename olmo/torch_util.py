@@ -4,7 +4,7 @@ import gc
 import os
 import logging
 from datetime import timedelta
-from typing import Optional, TypeVar, List, Tuple, MutableMapping, Any
+from typing import Dict, Optional, TypeVar, List, Tuple, MutableMapping, Any
 
 import torch
 import torch.distributed as dist
@@ -188,6 +188,31 @@ def peak_gpu_memory(reset: bool = False) -> Optional[float]:
         torch.cuda.reset_max_memory_allocated(device)
 
     return peak_mb
+
+
+def process_memory_stats() -> Dict[str, float]:
+    """Per-process CPU memory snapshot in MB. Caller handles any cross-rank gather."""
+    import resource
+    import psutil
+
+    p = psutil.Process()
+    mi = p.memory_info()
+    children_rss = sum(c.memory_info().rss for c in p.children(recursive=True))
+    # ru_maxrss is KB on Linux, bytes on macOS. We run on Linux.
+    peak_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    stats = {
+        "cpu_rss_mb": mi.rss / 1e6,
+        "cpu_vms_mb": mi.vms / 1e6,
+        "cpu_children_rss_mb": children_rss / 1e6,
+        "peak_cpu_rss_mb": peak_rss_kb / 1024,
+        "mem_available_mb": psutil.virtual_memory().available / 1e6,
+    }
+    try:
+        st = os.statvfs("/dev/shm")
+        stats["shm_used_mb"] = (st.f_blocks - st.f_bavail) * st.f_frsize / 1e6
+    except OSError:
+        pass
+    return stats
 
 
 V = TypeVar("V", bool, int, float)

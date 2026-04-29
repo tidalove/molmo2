@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 
 def _init_fn(worker_id):
     add_cached_path_clients()
+    import os
+    import psutil
+    rss_mb = psutil.Process().memory_info().rss / 1e6
+    log.info(f"[worker {worker_id} pid={os.getpid()} rank={get_global_rank()}] startup rss={rss_mb:.0f}MB")
 
 
 @dataclass
