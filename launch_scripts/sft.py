@@ -176,7 +176,8 @@ INDIVIDUAL_DATASETS = {
     "cfc_track": "tracking",
     "panaf_track": "tracking",
     "cfc_multi": "tracking",
-    "cfc_guided": "tracking"
+    "cfc_guided": "tracking",
+    "cfc_target": "tracking",
 }
 
 
@@ -236,11 +237,11 @@ TRACKING_MIXTURE_v2_1 = [
 ]
 
 
-def get_model(checkpoint, model):
+def get_model(checkpoint, model, upweight_loss=False):
     model_cfg = MolmoConfig.load(join(checkpoint, "config.yaml"), key="model")
 
     if isinstance(model_cfg, MolmoPointConfig):
-        return get_molmo_point_model(model_cfg)
+        return get_molmo_point_model(model_cfg, upweight_loss=upweight_loss)
 
     video_preprocessor_cfg = VideoPreprocessorConfig(
         pooling_h=3,
@@ -298,7 +299,7 @@ def get_model(checkpoint, model):
     return model_cfg
 
 
-def get_molmo_point_model(model_cfg):
+def get_molmo_point_model(model_cfg, upweight_loss=False):
     """Apply fine-tuning overrides to a MolmoPointConfig loaded from checkpoint."""
     # Video settings for fine-tuning (reduce from long-context 384 frames)
     model_cfg.mm_preprocessor.video.max_frames = 128
@@ -311,6 +312,7 @@ def get_molmo_point_model(model_cfg):
     # SFT settings
     model_cfg.mm_preprocessor.last_message_loss_only = True
     model_cfg.mm_preprocessor.loss_token_weighting = "root_subsegments_root_tokens"
+    model_cfg.mm_preprocessor.weigh_first_token = upweight_loss
 
     # Multi-image settings
     model_cfg.mm_preprocessor.image.max_multi_image_crops = 8
@@ -505,6 +507,8 @@ def main():
     parser.add_argument("--ft_vit", action="store_true")
     parser.add_argument("--ft_llm", action="store_true")
     parser.add_argument("--ft_connector", action="store_true")
+    parser.add_argument("--upweight_loss", action="store_true",
+                        help="Set model_cfg.mm_preprocessor.weigh_first_token=True")
     args, other_args = parser.parse_known_args()
 
     if args.mixture == "debug":
@@ -542,7 +546,7 @@ def main():
     seq_len = args.seq_len
 
     checkpoint = select_checkpoint(args.checkpoint)
-    model_cfg = get_model(checkpoint, args.model)
+    model_cfg = get_model(checkpoint, args.model, upweight_loss=args.upweight_loss)
 
     if args.debug:
         checkpoint = None
@@ -655,12 +659,12 @@ def main():
         fsdp=FSDPConfig(fsdp2=True),
         load_path=None,
         initial_model_checkpoint=checkpoint,
-        save_interval=50,
+        save_interval=20,
         save_num_checkpoints_to_keep=5,
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
-        max_duration=100,
+        max_duration=200,
         stop_at="${max_duration}",
         max_grad_norm=1,
         batch_divisor=BatchDivisor.global_batch,
