@@ -18,7 +18,8 @@ from olmo.data.academic_video_datasets import (
     TVQA, NeXTQA, CharadesSTA
 )
 from olmo.data.academic_video_track_datasets import (
-    PanAf, PanAfICL, PanAfGuided, CFC, CFCMultiTurn, CFCGuided, CFCTargetedInference, CFCTargetedTrain,
+    PanAf, PanAfICL, PanAfGuided, CFC, CFCText, CFCMultiTurn, CFCGuided, CFCTargeted,
+    CFCCorrection, CFCCorrectionIncomplete, CFCCorrectionReal,
     Mevis, MevisCaption, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
     LVVIS, YTVIS, ViCaS, ReVOS, MoCA,
     LVOSv1, LVOSv2, LaSOT, UWCOT, WebUOT, LaTOT, TNL2K, TNLLT,
@@ -437,10 +438,28 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         return CFC(split=split, task="track", sampling_fps=1)
     if dataset_name == "cfc_track_eval_2fps":
         return CFC(split=split, task="track", sampling_fps=2)
+    # cfc v1 (chunking aug) + v2 (token-budget chunks): use CFC class with renamed splits
+    if dataset_name == "cfc_track_v1":
+        return CFC(split=split, task="track")
+    if dataset_name == "cfc_track_v1_eval_1fps":
+        return CFC(split=split, task="track", sampling_fps=1)
+    if dataset_name == "cfc_track_v1_eval_2fps":
+        return CFC(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_track_v2":
+        return CFC(split=split, task="track")
+    if dataset_name == "cfc_track_v2_eval_1fps":
+        return CFC(split=split, task="track", sampling_fps=1)
+    if dataset_name == "cfc_track_v2_eval_2fps":
+        return CFC(split=split, task="track", sampling_fps=2)
+    # cfc_text: text-only correction QA (no video)
+    if dataset_name == "cfc_text":
+        return CFCText(split=split, task="track")
+    if dataset_name == "cfc_text_eval_2fps":
+        return CFCText(split=split, task="track", sampling_fps=2)
     if dataset_name == "cfc_target_track_eval_2fps":
-        return CFCTargetedInference(split=split, task="track", sampling_fps=2)
+        return CFCTargeted(split=split, task="track", sampling_fps=2)
     if dataset_name == "cfc_target":
-        return CFCTargetedTrain(split=split, task="track", sampling_fps=2)
+        return CFCTargeted(split=split, task="track", sampling_fps=2)
     if dataset_name == "cfc_guided":
         return CFCGuided(split=split, task="track")
     if dataset_name == "cfc_guided_track_eval_2fps":
@@ -448,6 +467,19 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
     # cfc: multi-turn
     if dataset_name == "cfc_multi":
         return CFCMultiTurn(split=split, task="track", sampling_fps=1)
+    # cfc correction variants (vision-corrections v2)
+    if dataset_name == "cfc_correction":
+        return CFCCorrection(split=split, task="track")
+    if dataset_name == "cfc_correction_eval_2fps":
+        return CFCCorrection(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_incomplete":
+        return CFCCorrectionIncomplete(split=split, task="track")
+    if dataset_name == "cfc_correction_incomplete_eval_2fps":
+        return CFCCorrectionIncomplete(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_real":
+        return CFCCorrectionReal(split=split, task="track")
+    if dataset_name == "cfc_correction_real_eval_2fps":
+        return CFCCorrectionReal(split=split, task="track", sampling_fps=2)
     # mevis: track, ground, single_point_track
     if dataset_name == "mevis_track": # Uses [1,2] sampling fps by default.
         return Mevis(split=split, task="track")

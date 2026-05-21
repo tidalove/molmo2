@@ -149,6 +149,8 @@ def get_evaluator(name) -> EvaluatorConfig:
         ]
     ):
         return EvaluatorConfig(video_object_tracking_eval=name)
+    elif name.startswith("cfc_text"):
+        return EvaluatorConfig(video_track_correction_eval=True)
     elif any(task in name for task in ["track_eval"]):
         return EvaluatorConfig(video_object_tracking_eval="point_track_per_frame")
     elif any(task in name for task in ["tap_davis"]):

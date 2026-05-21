@@ -416,8 +416,9 @@ class TrackingDataset(Dataset):
         self.task = task
         self.sampling_fps = sampling_fps
         self.use_fps_sampling = use_fps_sampling
-        self.is_eval = split not in ["train"]
+        self.is_eval = not (split == "train" or split.startswith("train-"))
         self.data_split = self.SPLIT_MAP[split]
+        self.video_home = self._get_home(self.data_split)
         self.video_dir = self._get_video_dir(self.data_split)
         self.data_lookup = {}
         self.data = self.load()
@@ -524,6 +525,7 @@ class TrackingDataset(Dataset):
             'w': ex['width'],
             'h': ex['height'],
             'video_fps': video_fps,
+            'sampling_fps': self.sampling_fps,
             'video': ex['video'],
         }
 
@@ -579,8 +581,13 @@ class LocalTrackingDataset(TrackingDataset):
     }
 
     @classmethod
+    def _get_home(cls, data_split):
+        """Per-split data root. Override in subclasses needing multi-tree routing."""
+        return cls.VIDEO_HOME
+
+    @classmethod
     def _get_anno_path(cls, data_split):
-        return join(cls.VIDEO_HOME, "annotations", f"{data_split}.json")
+        return join(cls._get_home(data_split), "annotations", f"{data_split}.json")
 
     @classmethod
     def _load_coco_json(cls, data_split):
@@ -592,12 +599,12 @@ class LocalTrackingDataset(TrackingDataset):
     @classmethod
     def _get_frames_dir(cls, data_split, video_name):
         # Frames are flat — not organized by split
-        return join(cls.VIDEO_HOME, "JPEGImages", video_name)
+        return join(cls._get_home(data_split), "JPEGImages", video_name)
 
     @classmethod
     def _get_video_dir(cls, data_split):
         # Single videos dir for all splits
-        return join(cls.VIDEO_HOME, "videos")
+        return join(cls._get_home(data_split), "videos")
 
     # ── Loading ────────────────────────────────────────────────────────────
 
@@ -690,6 +697,7 @@ class LocalTrackingDataset(TrackingDataset):
             'w': ex['width'],
             'h': ex['height'],
             'video_fps': ex.get('fps', self.VIDEO_FPS),
+            'sampling_fps': self.sampling_fps,
             'video': ex['video'],
         }
 
@@ -714,7 +722,7 @@ class LocalTrackingDataset(TrackingDataset):
             if "points" in item['message_list'][0]:
                 item['metadata']['points'] = item['message_list'][0]['points']
             item['metadata']['mask_id'] = ex['mask_id']
-            masks_path = join(self.VIDEO_HOME, "MasksRLE", ex['video'], f"{ex.get('qid', '0')}.json")
+            masks_path = join(self.video_home, "MasksRLE", ex['video'], f"{ex.get('qid', '0')}.json")
             if exists(masks_path):
                 with open(masks_path, 'r') as f:
                     item['metadata']['masks'] = json.load(f)
@@ -1049,8 +1057,8 @@ class CFC(LocalTrackingDataset):
     TASKS = ['track']
     VIDEO_FPS = 6
     SPLIT_MAP = {
-        "train": "kenai-train-subsampled",
-        "validation": "kenai-val",
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
         "sample": "val_sample",
         "sample-short": "val_sample_short",
         "val-short": "kenai-val-short",
@@ -1066,8 +1074,23 @@ class CFC(LocalTrackingDataset):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        # v1 (chunking aug) — data lives in CFCv1/ tree
+        "train-v1": "all-rivers-train-v1",
+        "validation-v1": "all-rivers-val-v1",
+        # v2 (token-budget chunks) — data lives in CFC/ tree
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
+    }
+    # Per-split data root override. Missing keys fall back to cls.VIDEO_HOME.
+    SPLIT_TO_HOME = {
+        "all-rivers-train-v1": join(VIDEO_TRACK_DATA_HOME, "CFCv1"),
+        "all-rivers-val-v1": join(VIDEO_TRACK_DATA_HOME, "CFCv1"),
     }
     EXPRESSION = "fish"
+
+    @classmethod
+    def _get_home(cls, data_split):
+        return cls.SPLIT_TO_HOME.get(data_split, cls.VIDEO_HOME)
 
     def _create_message_list(self, ex):
         message_list = super()._create_message_list(ex)
@@ -1076,6 +1099,8 @@ class CFC(LocalTrackingDataset):
 
     def load(self):
         coco = self._load_coco_json(self.data_split)
+        # Per-clip fps from optional `videos` list (v1+ splits); absent → cls.VIDEO_FPS.
+        fps_map = {v["id"]: v["fps"] for v in coco.get("videos", [])}
 
         # Index images and annotations by video
         image_by_id = {img['id']: img for img in coco['images']}
@@ -1094,7 +1119,8 @@ class CFC(LocalTrackingDataset):
             video_annots = []
             for img in images:
                 video_annots.extend(annots_by_image.get(img['id'], []))
-            example = self._build_video_annotation(video_id, images, video_annots)
+            fps = fps_map.get(video_id)
+            example = self._build_video_annotation(video_id, images, video_annots, fps=fps)
             data.append(example)
 
         self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
@@ -1113,14 +1139,17 @@ class CFC(LocalTrackingDataset):
         return video_fps
 
     @classmethod
-    def _build_video_annotation(cls, video_id, images, annotations):
+    def _build_video_annotation(cls, video_id, images, annotations, fps=None):
         """Convert COCO images + annotations for one video into tracking format.
 
         Args:
             video_id: Video identifier string.
             images: Sorted list of COCO image dicts for this video.
             annotations: List of COCO annotation dicts for this video.
+            fps: Per-video framerate override. Defaults to cls.VIDEO_FPS.
         """
+        if fps is None:
+            fps = cls.VIDEO_FPS
         height = images[0]['height']
         width = images[0]['width']
         n_frames = len(images)
@@ -1161,7 +1190,7 @@ class CFC(LocalTrackingDataset):
                 })
             frame_trajectories.append({
                 "frame": frame_idx,
-                "time": frame_idx / cls.VIDEO_FPS,
+                "time": frame_idx / fps,
                 "points": points,
             })
 
@@ -1171,14 +1200,14 @@ class CFC(LocalTrackingDataset):
             "expression": cls.EXPRESSION,
             "height": height,
             "width": width,
-            "fps": cls.VIDEO_FPS,
-            "sampling_fps": cls.VIDEO_FPS,
+            "fps": fps,
+            "sampling_fps": fps,
             "mask_id": [str(i) for i in range(len(fish_ids))],
             "obj_id": [str(i) for i in range(len(fish_ids))],
             "anno_id": anno_ids,
             "qid": "0",
             "frame_trajectories": frame_trajectories,
-            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
+            "prepend": "", # "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
         }
 
     @classmethod
@@ -1265,20 +1294,23 @@ class CFC(LocalTrackingDataset):
                  f"out of {len(images_by_video)} videos.")
 
 
-class CFCTargetedInference(CFC):
+class CFCTargeted(CFC):
     """CFC with multiple queries per video, with different sets of tracks as ground truth.
 
     Each query has a qid, a natural-language expression, and a target_ids subset of
     track_ids that form the ground truth. One example per query, plus a default
     "track all fish" example (qid=0) per video.
+
+    The queries JSON is selected from the data_split: training splits load the train
+    queries file; everything else loads the val queries file.
     """
     DATASET_NAME = "cfc_target"
     VIDEO_HOME = join(VIDEO_TRACK_DATA_HOME, "CFC")
     TASKS = ['track']
     VIDEO_FPS = 6
     SPLIT_MAP = {
-        "train": "kenai-train-subsampled",
-        "validation": "kenai-val",
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
         "sample": "val_sample",
         "sample-short": "val_sample_short",
         "val-short": "kenai-val-short",
@@ -1294,22 +1326,34 @@ class CFCTargetedInference(CFC):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        "train-v1": "all-rivers-train-v1",
+        "validation-v1": "all-rivers-val-v1",
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
     }
-    QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "queries.json")
-    _queries = None  # lazy-loaded cache
+    VAL_QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "all-rivers-val-v2-queries.json")
+    TRAIN_QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "all-rivers-train-v2-queries.json")
+    _queries_cache: dict = {}  # path -> loaded queries dict
 
     @classmethod
-    def _load_queries(cls):
-        if cls._queries is None:
-            assert exists(cls.QUERIES_PATH), f"Queries file not found: {cls.QUERIES_PATH}"
-            with open(cls.QUERIES_PATH, 'r') as f:
-                cls._queries = json.load(f)
-            log.info(f"[{cls.DATASET_NAME}] Loaded queries for {len(cls._queries)} videos")
-        return cls._queries
+    def _get_queries_path(cls, data_split):
+        # Training splits use the train queries file; everything else uses val.
+        if data_split.startswith("all-rivers-train"):
+            return cls.TRAIN_QUERIES_PATH
+        return cls.VAL_QUERIES_PATH
+
+    @classmethod
+    def _load_queries(cls, path):
+        if path not in cls._queries_cache:
+            assert exists(path), f"Queries file not found: {path}"
+            with open(path, 'r') as f:
+                cls._queries_cache[path] = json.load(f)
+            log.info(f"[{cls.DATASET_NAME}] Loaded queries for {len(cls._queries_cache[path])} videos from {path}")
+        return cls._queries_cache[path]
 
     def load(self):
         coco = self._load_coco_json(self.data_split)
-        queries = self._load_queries()
+        queries = self._load_queries(self._get_queries_path(self.data_split))
 
         images_by_video = {}
         for img in coco['images']:
@@ -1407,20 +1451,25 @@ class CFCTargetedInference(CFC):
             "anno_id": anno_ids,
             "qid": qid_str,
             "frame_trajectories": frame_trajectories,
-            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
+            "prepend": "", # "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
         }
 
     @classmethod
     def _precompute_gt_masks_for_split(cls, data_split):
         """Convert bbox annotations to RLE masks, one JSON per (video_id, qid).
 
+        Always loads from the val queries file — train splits don't need precomputed
+        masks. For each in-split video, deletes any existing `{qid}.json` (qid != 0)
+        in `MasksRLE/{video_id}/` before re-encoding from the current queries file.
+        `0.json` ("track all fish") is split-independent and preserved if present;
+        regenerated only if missing. Out-of-split video dirs are untouched.
+
         Saves to: VIDEO_HOME/MasksRLE/{video_id}/{qid}.json
-        Includes qid=0 ("track all fish") plus one file per targeted query.
         """
         cls._migrate_legacy_masks()
 
         coco = cls._load_coco_json(data_split)
-        queries = cls._load_queries()
+        queries = cls._load_queries(cls.VAL_QUERIES_PATH)
 
         images_by_video = {}
         for img in coco['images']:
@@ -1434,7 +1483,7 @@ class CFCTargetedInference(CFC):
         os.makedirs(output_base, exist_ok=True)
 
         n_encoded = 0
-        n_skipped = 0
+        n_deleted = 0
         for video_id, images in tqdm(sorted(images_by_video.items()),
                                      desc=f"Encoding GT masks ({data_split})"):
             images = sorted(images, key=lambda x: int(x['file_name'][x['file_name'].rfind('_')+1:x['file_name'].rfind('.')]))
@@ -1456,15 +1505,20 @@ class CFCTargetedInference(CFC):
             video_out_dir = join(output_base, video_id)
             os.makedirs(video_out_dir, exist_ok=True)
 
-            query_list = [("0", all_fish_ids)]
-            for q in queries.get(video_id, []):
-                query_list.append((str(q['qid']), sorted(q['target_ids'])))
+            # Wipe stale per-query masks; keep 0.json (split-independent).
+            for existing in glob(join(video_out_dir, "*.json")):
+                if os.path.basename(existing) != "0.json":
+                    os.remove(existing)
+                    n_deleted += 1
+
+            query_list = [(str(q['qid']), sorted(q['target_ids']))
+                          for q in queries.get(video_id, [])]
+            # Cold-start: write 0.json if missing.
+            if not exists(join(video_out_dir, "0.json")):
+                query_list.insert(0, ("0", all_fish_ids))
 
             for qid_str, fish_ids in query_list:
                 out_path = join(video_out_dir, f"{qid_str}.json")
-                if exists(out_path):
-                    n_skipped += 1
-                    continue
                 mask_annot = {}
                 for obj_idx, fid in enumerate(fish_ids):
                     frame_masks = []
@@ -1480,8 +1534,10 @@ class CFCTargetedInference(CFC):
                 n_encoded += 1
 
         log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
-                 f"{n_encoded} new, {n_skipped} already exist.")
+                 f"{n_encoded} written, {n_deleted} stale removed.")
 
+# Deprecated: kept as historical reference for the multi-message training path.
+# Not registered in get_dataset.py; use CFCTargeted instead.
 class CFCTargetedTrain(CFC):
     """CFC with multiple queries per video, with different sets of tracks as ground truth.
 
@@ -1495,8 +1551,8 @@ class CFCTargetedTrain(CFC):
     TASKS = ['track']
     VIDEO_FPS = 6
     SPLIT_MAP = {
-        "train": "kenai-train-subsampled",
-        "validation": "kenai-val",
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
         "sample": "val_sample",
         "sample-short": "val_sample_short",
         "val-short": "kenai-val-short",
@@ -1512,8 +1568,12 @@ class CFCTargetedTrain(CFC):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        "train-v1": "all-rivers-train-v1",
+        "validation-v1": "all-rivers-val-v1",
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
     }
-    QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "queries.json")
+    QUERIES_PATH = join(VIDEO_HOME, "caption_annotations", "all-rivers-train-v2-queries.json")
     _queries = None  # lazy-loaded cache
 
     def __init__(self, *args, **kwargs):
@@ -1682,7 +1742,7 @@ class CFCTargetedTrain(CFC):
                 "anno_id": anno_ids,
                 "qid": qid_str,
                 "frame_trajectories": frame_trajectories,
-                "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
+                "prepend": "", # "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. "
             }
             example_list.append(query_example)
 
@@ -1695,7 +1755,7 @@ class CFCTargetedTrain(CFC):
             "fps": cls.VIDEO_FPS,
             "sampling_fps": cls.VIDEO_FPS,
             "qid": "multi",
-            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
+            "prepend": "", # "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
             "example_list": example_list
         }
 
@@ -1707,8 +1767,8 @@ class CFCGuided(CFC):
     TASKS = ['track']
     VIDEO_FPS = 6
     SPLIT_MAP = {
-        "train": "kenai-train-subsampled",
-        "validation": "kenai-val",
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
         "sample": "val_sample",
         "sample-short": "val_sample_short",
         "val-short": "kenai-val-short",
@@ -1724,33 +1784,47 @@ class CFCGuided(CFC):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        "train-v1": "all-rivers-train-v1",
+        "validation-v1": "all-rivers-val-v1",
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
+    }
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-captions.json",
+        "all-rivers-val-v2": "all-rivers-val-v2-captions.json",
     }
     EXPRESSION = "fish"
     CAPTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "captions_short.json")
     _captions = None # lazy-loaded cache
 
-    @classmethod
-    def _load_captions(cls):
-        if cls._captions is None:
-            with open(cls.CAPTIONS_PATH, 'r') as f:
-                cls._captions = json.load(f)
-            log.info(f"[{cls.DATASET_NAME}] Loaded {len(cls._captions)} captions")
-        return cls._captions
+    def _load_captions(self):
+        """Lazy per-split caption load. Cached on the instance."""
+        if self._captions is None:
+            split_to_file = getattr(self, "SPLIT_TO_FILE", None)
+            if split_to_file:
+                fname = split_to_file[self.data_split]
+                path = join(self.VIDEO_HOME, "caption_annotations", fname)
+            else:
+                path = self.CAPTIONS_PATH
+            with open(path, "r") as f:
+                self._captions = json.load(f)
+            log.info(f"[{self.DATASET_NAME}] Loaded {len(self._captions)} "
+                     f"captions from {path}")
+        return self._captions
 
-    @classmethod
-    def _prepend_prompt(cls, video_id):
-        captions = cls._load_captions()
-        caption = captions.get(video_id).get("caption")
-        if caption is None:
-            log.warning(f"[{cls.DATASET_NAME}] No caption for {video_id}")
+    def _prepend_prompt(self, video_id):
+        captions = self._load_captions()
+        entry = captions.get(video_id)
+        if entry is None or entry.get("caption") is None:
+            log.warning(f"[{self.DATASET_NAME}] No caption for {video_id}")
             return ""
-        return caption
+        return entry["caption"]
 
-    @classmethod
-    def _build_video_annotation(cls, video_id, images, annotations):
-        # Reuse CFC's annotation builder, then add dataset-specific prepend field
-        result = CFC._build_video_annotation.__func__(cls, video_id, images, annotations)
-        result['prepend'] = result['prepend'] + cls._prepend_prompt(video_id)
+    def _build_video_annotation(self, video_id, images, annotations, fps=None):
+        # Reuse CFC's annotation builder, then add dataset-specific prepend field.
+        result = CFC._build_video_annotation.__func__(
+            type(self), video_id, images, annotations, fps=fps)
+        result["prepend"] = result["prepend"] + self._prepend_prompt(video_id)
         return result
 
 
@@ -1761,8 +1835,8 @@ class CFCMultiTurn(CFC):
     TASKS = ["track"]
     VIDEO_FPS = 6
     SPLIT_MAP = {
-        "train": "kenai-train-subsampled",
-        "validation": "kenai-val",
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
         "sample": "val_sample",
         "sample-short": "val_sample_short",
         "val-short": "kenai-val-short",
@@ -1778,9 +1852,54 @@ class CFCMultiTurn(CFC):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        "train-v1": "all-rivers-train-v1",
+        "validation-v1": "all-rivers-val-v1",
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
     }
     EXPRESSION = "fish"
     CORRECTIONS_PATH = join(VIDEO_HOME, "caption_annotations", "corrections_short.jsonl")
+    # Optional id-namespace suffix appended to example ids so MasksRLE outputs
+    # from different correction-source subclasses don't collide.
+    ID_TAG = ""
+    # Range regex tried first so single-frame regex doesn't eat half a range.
+    # Captures separator so "between frames N and M" stays "between Ns and Ms".
+    _FRAME_RANGE_RE = re.compile(
+        r'\bframes?\s+(\d+)\s+(to|and|through|until)\s+(\d+)\b',
+        re.I,
+    )
+    _FRAME_RANGE_DASH_RE = re.compile(r'\bframes?\s+(\d+)\s*-\s*(\d+)\b', re.I)
+    _FRAME_SINGLE_RE = re.compile(r'\bframes?\s+(\d+)\b', re.I)
+
+    @classmethod
+    def replace_frames_with_time(cls, text, fps):
+        """Rewrite frame references as time, nearest integer second, 'Ns' format.
+
+        Handles single ('frame N', 'frames N') and range ('frames N to M',
+        'frame N and M', 'frames N-M', 'frames N through M') phrasings.
+        Surrounding prepositions (at/around/from/between) and the range
+        separator (to/and/through/until/-) are preserved; only the
+        'frame(s)' word and the numbers are rewritten to time.
+        """
+        def _range_sub(m):
+            n = round(int(m.group(1)) / fps)
+            sep = m.group(2)
+            k = round(int(m.group(3)) / fps)
+            return f"{n}s {sep} {k}s"
+
+        def _range_dash_sub(m):
+            n = round(int(m.group(1)) / fps)
+            k = round(int(m.group(2)) / fps)
+            return f"{n}s-{k}s"
+
+        def _single_sub(m):
+            n = round(int(m.group(1)) / fps)
+            return f"{n}s"
+
+        text = cls._FRAME_RANGE_RE.sub(_range_sub, text)
+        text = cls._FRAME_RANGE_DASH_RE.sub(_range_dash_sub, text)
+        text = cls._FRAME_SINGLE_RE.sub(_single_sub, text)
+        return text
 
     def _create_message_list(self, ex):
         """Create multi-turn message list from correction trajectory."""
@@ -1797,8 +1916,8 @@ class CFCMultiTurn(CFC):
                 sampling_fps=ex['sampling_fps'],
                 style="video_point_track_per_frame",
             )
-            if i == 0:
-                msg['prepend'] = ex.get('prepend')
+            # if i == 0:
+            #     msg['prepend'] = ex.get('prepend')
             message_list.append(msg)
         return message_list
 
@@ -1817,6 +1936,7 @@ class CFCMultiTurn(CFC):
             'w': ex['width'],
             'h': ex['height'],
             'video_fps': video_fps,
+            'sampling_fps': self.sampling_fps,
             'video': ex['video'],
         }
 
@@ -1837,21 +1957,135 @@ class CFCMultiTurn(CFC):
         }
 
     def load(self):
-        assert exists(self.CORRECTIONS_PATH), f"Corrections file not found: {self.CORRECTIONS_PATH}"
+        # Subclasses may set SPLIT_TO_FILE/SPLIT_TO_FPS_SOURCE; otherwise fall
+        # back to the single class-level CORRECTIONS_PATH and per-split COCO.
+        split_to_file = getattr(self, "SPLIT_TO_FILE", None)
+        if split_to_file:
+            fname = split_to_file[self.data_split]
+            path = join(self.video_home, "caption_annotations", fname)
+        else:
+            path = self.CORRECTIONS_PATH
+        assert exists(path), f"Corrections file not found: {path}"
+
+        fps_split = getattr(self, "SPLIT_TO_FPS_SOURCE", {}).get(
+            self.data_split, self.data_split)
+        coco_path = join(self.video_home, "annotations", f"{fps_split}.json")
+        fps_map = {}
+        if exists(coco_path):
+            with open(coco_path) as f:
+                coco = json.load(f)
+            fps_map = {v["id"]: v["fps"] for v in coco.get("videos", [])}
+
         data = []
-        with open(self.CORRECTIONS_PATH) as f:
+        n_missing_fps = 0
+        log_examples = []
+        with open(path) as f:
             for line in f:
                 record = json.loads(line)
                 video_id = record['video_name']
+                native_fps = fps_map.get(video_id)
+                if native_fps is None:
+                    n_missing_fps += 1
+                    native_fps = self.VIDEO_FPS
                 images = sorted(record['images'], key=lambda x: x['id'])
                 for trajectory in record['trajectories']:
+                    rewritten_steps = []
+                    for cs in trajectory['correction_steps']:
+                        new_cs = dict(cs)
+                        new_cs['prompt'] = self.replace_frames_with_time(
+                            cs['prompt'], native_fps)
+                        rewritten_steps.append(new_cs)
+                        if cs['prompt'] != new_cs['prompt'] and len(log_examples) < 3:
+                            log_examples.append(
+                                (cs['prompt'], new_cs['prompt'], native_fps))
                     example = self._build_video_annotation(
-                        video_id, images, trajectory['correction_steps'])
+                        video_id, images, rewritten_steps)
+                    example['id'] = f"{video_id}{self.ID_TAG}_traj{trajectory['trajectory_id']}"
+                    example['qid'] = example['id']
+                    example['fps'] = native_fps
+                    example['sampling_fps'] = native_fps
                     data.append(example)
+        if n_missing_fps:
+            log.warning(f"[{self.DATASET_NAME}] {n_missing_fps} videos missing fps in {coco_path}, fallback to {self.VIDEO_FPS}")
+        for before, after, fps in log_examples:
+            log.info(f"[{self.DATASET_NAME}] (fps={fps}) frame-rewrite example:\n  before: {before}\n  after:  {after}")
         self.data_lookup = {ex['id']: i for i, ex in enumerate(data)}
-        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} videos for split={self.data_split}")
+        log.info(f"[{self.DATASET_NAME}] Loaded {len(data)} trajectories for split={self.data_split}")
         return data
-    
+
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """Per-trajectory MasksRLE built from the last correction step of each
+        trajectory in the JSONL. Bboxes are in flipped (JSONL) frame, matching
+        metadata.points/initial_points. Slot order = sorted(traj_track_ids),
+        matching _build_video_annotation's per-step track_id_to_obj ordering.
+
+        Saves to: VIDEO_HOME/MasksRLE/{example_id}/0.json where
+        example_id = f"{video_id}{cls.ID_TAG}_traj{trajectory_id}".
+        """
+        split_to_file = getattr(cls, "SPLIT_TO_FILE", None)
+        if split_to_file:
+            jsonl_path = join(cls.VIDEO_HOME, "caption_annotations",
+                              split_to_file[data_split])
+        else:
+            jsonl_path = cls.CORRECTIONS_PATH
+        output_base = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_base, exist_ok=True)
+
+        records = []
+        with open(jsonl_path) as f:
+            for line in f:
+                records.append(json.loads(line))
+
+        n_encoded = n_skipped = 0
+        for rec in tqdm(records, desc=f"{cls.DATASET_NAME} MasksRLE ({data_split})"):
+            video_id = rec['video_name']
+            images = sorted(rec['images'], key=lambda im: im['id'])
+            height, width = images[0]['height'], images[0]['width']
+            n_frames = len(images)
+            image_id_to_frame = {img['id']: idx for idx, img in enumerate(images)}
+
+            for traj in rec['trajectories']:
+                example_id = f"{video_id}{cls.ID_TAG}_traj{traj['trajectory_id']}"
+                out_dir = join(output_base, example_id)
+                out_path = join(out_dir, "0.json")
+                if exists(out_path):
+                    n_skipped += 1
+                    continue
+                os.makedirs(out_dir, exist_ok=True)
+
+                gt_step = max(traj['correction_steps'],
+                              key=lambda s: s['correction_step'])
+                traj_track_ids = sorted({ann['track_id']
+                                         for ann in gt_step['annotations']})
+                bbox_lookup = {}
+                for ann in gt_step['annotations']:
+                    fidx = image_id_to_frame.get(ann['image_id'])
+                    if fidx is not None:
+                        bbox_lookup[(fidx, ann['track_id'])] = ann['bbox']
+
+                mask_annot = {}
+                for slot, tid in enumerate(traj_track_ids):
+                    frame_masks = []
+                    for fidx in range(n_frames):
+                        bbox = bbox_lookup.get((fidx, tid))
+                        frame_masks.append(
+                            None if bbox is None
+                            else cls._bbox_to_rle(bbox, height, width))
+                    mask_annot[slot] = frame_masks
+
+                with open(out_path, 'w') as fp:
+                    json.dump(mask_annot, fp)
+                n_encoded += 1
+
+        log.info(f"[{cls.DATASET_NAME}] MasksRLE ({data_split}): "
+                 f"{n_encoded} new, {n_skipped} skipped.")
+
+    @classmethod
+    def _precompute_gt_masks(cls):
+        for data_split in set(cls.SPLIT_MAP.values()):
+            cls._precompute_gt_masks_for_split(data_split)
+
     @classmethod
     def _build_video_annotation(cls, video_id, images, trajectory):
         """Convert COCO images + multiple steps of annotations for one video into tracking format.
@@ -1923,10 +2157,119 @@ class CFCMultiTurn(CFC):
             "mask_id": [str(i) for i in range(len(all_track_ids))],
             "obj_id": [str(i) for i in range(len(all_track_ids))],
             "qid": video_id,
-            "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
+            # "prepend": "This is a noisy, pixelated grayscale sonar video of fish swimming through a river. Fish look like small, blurry white blobs against a darker gray background. ",
             "prompts_list": prompts_list,
             "points_list": points_list,
         }
+
+class CFCText(CFCMultiTurn):
+    """
+    Text-only track correction data used to train "mechanical" track correction ability
+    into Molmo2 LLM.
+
+    Loads all bounding boxes from correction trajectory data first, using similar utilities
+    as CFCMultiTurn.
+    """
+    DATASET_NAME = "cfc_text"
+    TASKS = ["track"]
+    VIDEO_FPS = 6
+    SPLIT_MAP = {
+        "train-kenai": "kenai-train",
+        "validation-kenai": "kenai-val",
+        "train-v2": "kenai-train", # temp
+        "validation-v2": "kenai-val", # temp
+    }
+    SPLIT_TO_FILE = {
+        "kenai-train": "text_corrections_kenai_train.jsonl",
+        "kenai-val":   "text_corrections_kenai_val.jsonl",
+    }
+    SPLIT_TO_FPS_SOURCE = {
+        "kenai-train": "kenai-train",
+        "kenai-val":   "kenai-val",
+    }
+    EXPRESSION = "fish"
+
+    def get(self, idx, rng):
+        ex = self.data[idx]
+        video_fps = ex.get("fps", self.VIDEO_FPS)
+        message_list = self._create_message_list(ex)
+
+        metadata = {
+            'example_id': ex['id'],
+            'task': self.task,
+            'expression': ex['expression'],
+            'w': ex['width'],
+            'h': ex['height'],
+            'video_fps': video_fps,
+            'sampling_fps': self.sampling_fps,
+        }
+
+        if self.use_fps_sampling:
+            metadata['sampler_overrides'] = {
+                'frame_sample_mode': 'fps',
+                'candidate_sampling_fps': self._get_candidate_fps(video_fps),
+                'min_fps': ex['sampling_fps'],
+            }
+
+        if self.is_eval:
+            points_list = ex['points_list']
+            metadata['points'] = points_list[-1]
+            metadata['initial_points'] = points_list[0]
+            metadata['mask_id'] = ex['mask_id']
+            metadata['video'] = ex['video']
+            masks_path = join(self.video_home, "MasksRLE", ex['id'], "0.json")
+            if exists(masks_path):
+                with open(masks_path, 'r') as f:
+                    metadata['masks'] = json.load(f)
+            else:
+                metadata['masks'] = {}
+
+        return {
+            'multi_turn_messages': message_list,
+            'sampling_fps': ex['sampling_fps'],
+            'metadata': metadata,
+            'fps': str(ex['sampling_fps']),
+            'label': ex['expression']
+        }
+
+
+class CFCCorrection(CFCMultiTurn):
+    """Vision-corrections v2 (complete trajectories) — train/val all-rivers."""
+    DATASET_NAME = "cfc_correction"
+    ID_TAG = "_complete"
+    SPLIT_MAP = {
+        "train-v2": "all-rivers-train-v2",
+        "validation-v2": "all-rivers-val-v2",
+    }
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections.jsonl",
+        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections.jsonl",
+    }
+    SPLIT_TO_FPS_SOURCE = {
+        "all-rivers-train-v2": "all-rivers-train-v2",
+        "all-rivers-val-v2":   "all-rivers-val-v2",
+    }
+
+
+class CFCCorrectionIncomplete(CFCCorrection):
+    """Vision-corrections v2, incomplete-trajectory variant."""
+    DATASET_NAME = "cfc_correction_incomplete"
+    ID_TAG = "_incomplete"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-incomplete.jsonl",
+        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-incomplete.jsonl",
+    }
+
+
+class CFCCorrectionReal(CFCCorrection):
+    """Vision-corrections v2, real-corrections variant (files pending)."""
+    DATASET_NAME = "cfc_correction_real"
+    ID_TAG = "_real"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-real.jsonl",
+        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-real.jsonl",
+    }
+
 
 class SAFARI(LocalTrackingDataset):
     DATASET_NAME = "safari"

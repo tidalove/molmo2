@@ -20,7 +20,7 @@ from .evaluators import (
     VinogroundEval, VixMoCaptionEval, QVHighlightsEval,
     TomatoEval, TemporalBenchEval, Dream1KCaptionEval, MMEVideoOCREval, VideoHallucerEval,
     MMIUEval, LVBenchEval, MulSetEval, Ego3dBenchEval, VSIBenchEval,
-    VideoObjectTrackingEval, VixMoPointCountEval, VixMoPointEval,
+    VideoObjectTrackingEval, VideoTrackCorrectionEval, VixMoPointCountEval, VixMoPointEval,
     PointBenchEval, ScreenSpotProEvaluator, ScreenSpotEvaluator, OsWorldGEvaluator
 )
 from .open_ended_qa_eval import OpenQaEvaluator
@@ -229,6 +229,7 @@ class EvaluatorConfig(BaseConfig):
     video_object_tracking_eval: str = '' # path with object tracking predictions
     video_single_point_prediction: str='' # path with single point predicitons
     video_point_tracking_eval: str = ''
+    video_track_correction_eval: bool = False
     """Video pointing task name to run evaluation on (e.g., 'mevis_point_track_per_frame_fps_6_sample_fps_1')"""
     
     """Whether to run RefExp evaluation"""
@@ -305,6 +306,8 @@ class EvaluatorConfig(BaseConfig):
             evaluators.append(MMEVideoOCREval(self.num_wandb_examples))
         elif self.video_object_tracking_eval:
             evaluators.append(VideoObjectTrackingEval(self.num_wandb_examples))
+        if self.video_track_correction_eval:
+            evaluators.append(VideoObjectTrackingEval(self.num_wandb_examples)) # VideoTrackCorrectionEval before
         if self.qv_highlights_eval:
             evaluators.append(QVHighlightsEval(self.num_wandb_examples))
         if self.open_qa_eval:

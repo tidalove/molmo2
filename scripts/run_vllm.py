@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import random as _random
 import argparse
 import logging
 from glob import glob
@@ -27,6 +28,56 @@ except ImportError:
     pass
 
 log = logging.getLogger(__name__)
+
+
+_TEXT_FORMATTER = None
+
+
+def _get_text_formatter():
+    """Lazily build a DataFormatter matching the trained Molmo2-8B config."""
+    global _TEXT_FORMATTER
+    if _TEXT_FORMATTER is None:
+        from olmo.preprocessing.data_formatter import DataFormatter
+        _TEXT_FORMATTER = DataFormatter(
+            prompt_templates="uber_model_v2",
+            message_format="qwen3",
+            system_prompt="demo_or_style_v2",
+            pointing_format="html-v2",
+            points_decimal_places=1,
+            timestamp_mode="50-percent-seconds",
+            output_timestamp_mode="seconds",
+            seconds_decimal_places=1,
+            max_output_fps=2,
+            debug=True,
+        )
+    return _TEXT_FORMATTER
+
+
+def build_multi_turn_chat(raw):
+    """Render a multi_turn_messages example into a chat list using the training formatter.
+
+    For each turn, calls DataFormatter.get_user_prompt to produce the same (prompt, response)
+    pair training would. Non-final turns emit user+assistant; final turn emits user only.
+    """
+    formatter = _get_text_formatter()
+    rng = _random.Random(0)
+    turns = raw["multi_turn_messages"]
+    chat = []
+    for i, turn in enumerate(turns):
+        prompt, response, _ = formatter.get_user_prompt(
+            turn, is_training=False, for_inference=False, rng=rng
+        )
+        style = turn.get("style", "demo")
+        chat.append({
+            "role": "user",
+            "content": [dict(type="text", text=prompt, style=style)],
+        })
+        if i < len(turns) - 1:
+            chat.append({
+                "role": "assistant",
+                "content": [dict(type="text", text=response)],
+            })
+    return chat
 
 
 def get_message(
@@ -83,6 +134,9 @@ def get_prompt_text(style, prompt_override, example=None):
     if example and 'message_list' in example:
         msg = example['message_list'][0]
         return build_prompt_for_inference(msg)
+    if example and 'multi_turn_messages' in example:
+        msg = example['multi_turn_messages'][0]
+        return build_prompt_for_inference(msg)
     if example and 'question' in example:
         return example['question']
     raise ValueError("No prompt source: provide --style or --prompt")
@@ -101,7 +155,7 @@ def build_examples(args, dataset=None):
         for i in range(len(dataset)):
             ex = dataset.get(i, None)
             ex_id = ex.get('metadata', {}).get('example_id', str(i))
-            examples.append({"raw": ex, "video": ex["video"], "example_id": ex_id})
+            examples.append({"raw": ex, "video": ex.get("video", None), "example_id": ex_id})
 
     if args.max_examples:
         examples = examples[:args.max_examples]
@@ -123,10 +177,30 @@ def build_vllm_input(example, style, prompt_override, processor, max_fps_overrid
 
     # Determine style for chat template
     effective_style = style
-    if not effective_style and raw and 'message_list' in raw:
-        effective_style = raw['message_list'][0].get('style', 'demo')
+    if not effective_style and raw:
+        if 'message_list' in raw:
+            effective_style = raw['message_list'][0].get('style', 'demo')
+        elif 'multi_turn_messages' in raw:
+            effective_style = raw['multi_turn_messages'][0].get('style', 'demo')
     if not effective_style:
         effective_style = 'demo'
+
+    video_path = example.get("video", None)
+    if video_path is None:
+        # Text-only path: render full multi-turn chat via training formatter.
+        if raw and "multi_turn_messages" in raw:
+            messages = build_multi_turn_chat(raw)
+        else:
+            messages = [{
+                "role": "user",
+                "content": [dict(type="text", text=prompt_text, style=effective_style)],
+            }]
+        prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return {
+            "prompt": prompt,
+            "multi_modal_data": {},
+            "mm_processor_kwargs": {},
+        }
 
     # Determine sampling_fps from dataset example if available
     sampling_fps = None
@@ -140,7 +214,7 @@ def build_vllm_input(example, style, prompt_override, processor, max_fps_overrid
 
     messages = get_message(
         images=None,
-        video_path=example["video"],
+        video_path=video_path,
         max_frames=max_frames,
         frame_sample_mode=frame_sample_mode,
         max_fps=max_fps,
@@ -167,7 +241,7 @@ def build_vllm_input(example, style, prompt_override, processor, max_fps_overrid
 
 def collect_metadata(example):
     """Extract serializable metadata fields from a dataset example."""
-    result = {"example_id": example["example_id"], "video": example["video"]}
+    result = {"example_id": example["example_id"], "video": example.get("video", None)}
     raw = example.get("raw")
     if raw:
         meta = raw.get("metadata", {})

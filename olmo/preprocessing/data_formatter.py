@@ -1456,7 +1456,8 @@ class DataFormatter(BaseConfig):
 
         # Filter frames to match actual video timestamps
         frames_data = example["points"]
-        frames_data = self._filter_frames_to_video(frames_data, timestamps)
+        # KAI PATCH hopefully temporary? for text-only training: skip filtering if there was no video
+        frames_data = frames_data if timestamps is None else self._filter_frames_to_video(frames_data, timestamps)
         # NOTE: if frames_data is empty after filtering, we still proceed to sample initial points from original frames later
         # Output will be just "There are none." in that case
 

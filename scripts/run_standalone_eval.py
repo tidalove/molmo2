@@ -3,7 +3,6 @@ import argparse
 import json
 import logging
 import os
-from collections import Counter, defaultdict
 from os.path import join, exists
 
 import numpy as np
@@ -15,32 +14,30 @@ from olmo.eval.evaluators import SavePredictions
 
 log = logging.getLogger(__name__)
 
-MASK_SCALES = [("strict", 1.0), ("lenient_1.5x", 1.5), ("lenient_2x", 2.0)]
+MASK_SCALES = [("strict", 1.0)]#, ("lenient_2x", 2.0)]
 
 CFC_VIDEO_FPS = 6
 
 
-def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS):
-    """Build per-(video, qid) metadata directly from precomputed MasksRLE files.
+def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS, sampling_fps=None):
+    """Build per-example_id metadata directly from precomputed MasksRLE files.
 
-    Walks {masks_dir}/{video_id}/{qid}.json. For each (video, qid), derives
-    GT points by computing bbox centroids from each RLE mask. No COCO JSON
-    or queries.json needed — masks are pre-grouped per qid.
+    Walks {masks_dir}/{example_id}/0.json (one qid per example). For each
+    example, derives GT points by computing bbox centroids from each RLE mask.
+    No COCO JSON or queries.json needed.
 
     Returns:
-        metadata_by_id: dict keyed by composite "{video_id}__{qid}". Also
-        aliased to plain video_id when qid=="0", for backward compat with
-        legacy CFC predictions that key on bare video_id.
+        metadata_by_id: dict keyed by example_id (basename of the dir).
     """
     from glob import glob as _glob
     from pycocotools import mask as mask_utils
 
     metadata_by_id = {}
     n_skipped = 0
-    video_dirs = sorted([d for d in _glob(join(masks_dir, "*")) if os.path.isdir(d)])
+    example_dirs = sorted([d for d in _glob(join(masks_dir, "*")) if os.path.isdir(d)])
 
-    for vdir in video_dirs:
-        video_id = os.path.basename(vdir)
+    for vdir in example_dirs:
+        example_id = os.path.basename(vdir)
         for mask_file in sorted(_glob(join(vdir, "*.json"))):
             qid = os.path.splitext(os.path.basename(mask_file))[0]
             with open(mask_file) as f:
@@ -80,21 +77,19 @@ def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS):
                     'points': frame_points,
                 })
 
-            example_id = f"{video_id}__{qid}"
             entry = {
                 'example_id': example_id,
                 'w': width,
                 'h': height,
                 'video_fps': video_fps,
-                'video': video_id,
+                'sampling_fps': sampling_fps,
+                'video': example_id,
                 'points': points,
+                'initial_points': points,
                 'masks': masks,
                 'mask_id': [str(i) for i in range(len(masks))],
             }
             metadata_by_id[example_id] = entry
-            if qid == "0":
-                # Alias for legacy CFC predictions keyed by bare video_id
-                metadata_by_id[video_id] = entry
 
     log.info(f"Built metadata for {len(metadata_by_id)} entries from {masks_dir} "
              f"({n_skipped} mask files skipped — all-None)")
@@ -107,6 +102,8 @@ def build_metadata_from_dataset(task, split):
 
     log.info(f"Loading dataset: {task} split={split}")
     dataset = get_dataset_by_name(task, split)
+    if hasattr(dataset, 'is_eval'):
+        dataset.is_eval = True
     log.info(f"Dataset size: {len(dataset)}")
 
     metadata_by_id = {}
@@ -117,6 +114,13 @@ def build_metadata_from_dataset(task, split):
 
     return metadata_by_id
 
+
+def _meta_width(meta):
+    if 'w' in meta:
+        return meta['w']
+    if 'image_size' in meta:
+        return meta['image_size'][0]
+    return None
 
 def classify_direction(track_points, width, threshold_frac=0.05):
     """Classify a track's net x-motion as 'left', 'right', or 'stationary'."""
@@ -132,54 +136,8 @@ def classify_direction(track_points, width, threshold_frac=0.05):
         return 'left'
     return 'stationary'
 
-
-def compute_count_metrics(matched_metadatas, matched_preds):
-    """Compare per-direction track counts between pred and GT."""
-    all_gt_counts = {'left': [], 'right': [], 'stationary': []}
-    all_pred_counts = {'left': [], 'right': [], 'stationary': []}
-
-    for meta, pred_points in zip(matched_metadatas, matched_preds):
-        if 'w' in meta:
-            w = meta['w']
-        elif 'image_size' in meta:
-            w = meta['image_size'][0]
-        else:
-            continue
-
-        gt_tracks = meta.get('points', [])
-
-        # GT: group by obj_id, get (x,y) sequence per track
-        gt_by_obj = defaultdict(list)
-        for frame_entry in gt_tracks:
-            for obj_id, pt in frame_entry['points'].items():
-                gt_by_obj[obj_id].append(tuple(pt['point']))
-
-        gt_dirs = Counter(classify_direction(pts, w) for pts in gt_by_obj.values())
-
-        # Pred: group by obj_id from [[obj_id, t, x, y], ...]
-        pred_by_obj = defaultdict(list)
-        if isinstance(pred_points, list):
-            for obj_id, t, x, y in pred_points:
-                pred_by_obj[int(obj_id)].append((x, y))
-
-        pred_dirs = Counter(classify_direction(pts, w) for pts in pred_by_obj.values())
-
-        for d in ['left', 'right', 'stationary']:
-            all_gt_counts[d].append(gt_dirs.get(d, 0))
-            all_pred_counts[d].append(pred_dirs.get(d, 0))
-
-    metrics = {}
-    for d in ['left', 'right', 'stationary']:
-        gt = all_gt_counts[d]
-        pred = all_pred_counts[d]
-        metrics[f'count/{d}_gt_total'] = sum(gt)
-        metrics[f'count/{d}_pred_total'] = sum(pred)
-        if gt:
-            metrics[f'count/{d}_abs_error_mean'] = float(np.mean([abs(p - g) for p, g in zip(pred, gt)]))
-    return metrics
-
-
-def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=None):
+def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=None, out_dir=None,
+             sampling_fps=None):
     """Run evaluation on a predictions file. Returns and writes resolved metrics dict."""
 
     # 1. Load predictions
@@ -200,17 +158,18 @@ def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=No
     # 3. Build metadata lookup. --masks_dir bypasses the dataset class entirely
     # by reading precomputed MasksRLE files directly.
     if masks_dir:
-        metadata_by_id = build_metadata_from_masks_rle(masks_dir)
+        metadata_by_id = build_metadata_from_masks_rle(masks_dir, sampling_fps=sampling_fps)
     else:
         metadata_by_id = build_metadata_from_dataset(task, split)
 
-    # 4. Match predictions to metadata
+    # 4. Match predictions to metadata.
     matched_metadatas = []
     matched_preds = []
     for pred_entry in predictions_json:
         eid = pred_entry['example_id']
-        if eid in metadata_by_id:
-            matched_metadatas.append(metadata_by_id[eid])
+        meta = metadata_by_id.get(eid)
+        if meta is not None:
+            matched_metadatas.append(meta)
             matched_preds.append(pred_entry['prediction'])
         else:
             log.warning(f"No metadata for example_id={eid}, skipping")
@@ -236,10 +195,6 @@ def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=No
             for k, v in results.items():
                 all_metrics[f"{prefix}/{k}"] = v
 
-    # 7. Compute count metrics
-    count_metrics = compute_count_metrics(matched_metadatas, matched_preds)
-    log.info(f"Count metrics: {count_metrics}")
-
     # 8. Resolve metrics (MeanMetric -> float)
     resolved_metrics = {}
     for k in sorted(all_metrics):
@@ -252,14 +207,15 @@ def run_eval(predictions_path, task, split="test", overwrite=False, masks_dir=No
             # Skip non-numeric metrics (HtmlTable, List, etc.)
             log.info(f"Skipping non-numeric metric {k}: {type(v).__name__}")
 
-    # Add count metrics (already floats/ints)
-    resolved_metrics.update(count_metrics)
-
     # 9. Log to console
     log_metrics_to_console(task, resolved_metrics)
 
     # 10. Write metrics.json
-    metrics_path = predictions_path[:predictions_path.rfind('/')] + "/metrics.json"
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        metrics_path = join(out_dir, "metrics.json")
+    else:
+        metrics_path = predictions_path[:predictions_path.rfind('/')] + "/metrics.json"
     if (not os.path.exists(metrics_path)) or overwrite:
         with open(metrics_path, 'w') as f:
             json.dump(resolved_metrics, f, indent=2)
@@ -279,10 +235,14 @@ if __name__ == "__main__":
                              "{video_id}/{qid}.json files (bypasses dataset class). Otherwise, "
                              "loads dataset via --task/--split.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing metrics.json if it exists")
+    parser.add_argument("--out_dir", default=None,
+                        help="Directory to write metrics.json into. Defaults to dir of --predictions.")
+    parser.add_argument("--sampling_fps", type=int, default=None,
+                        help="Pred cadence (Hz) for GT subsampling. Used only with --masks_dir.")
     args = parser.parse_args()
 
     prepare_cli_environment()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     run_eval(args.predictions, args.task, args.split, args.overwrite,
-             masks_dir=args.masks_dir)
+             masks_dir=args.masks_dir, out_dir=args.out_dir, sampling_fps=args.sampling_fps)
