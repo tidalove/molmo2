@@ -178,6 +178,12 @@ INDIVIDUAL_DATASETS = {
     "cfc_multi": "tracking",
     "cfc_guided": "tracking",
     "cfc_target": "tracking",
+    "cfc_track_v1": "tracking",
+    "cfc_track_v2": "tracking",
+    "cfc_text": "tracking",
+    "cfc_correction": "tracking",
+    "cfc_correction_incomplete": "tracking",
+    "cfc_correction_real": "tracking",
 }
 
 
@@ -407,6 +413,32 @@ def get_training_mixture(name):
         ]
     elif name in INDIVIDUAL_DATASETS:
         training_mixture = [[INDIVIDUAL_DATASETS[name], [name], 1.0]]
+    elif name == "cfc_base":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.5],
+            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.5],
+        ]
+    elif name == "cfc_all_synthetic":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.1],
+            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_text", ["cfc_text"], 0.1],
+            ["cfc_guided", ["cfc_guided"], 0.1],
+            ["cfc_correction", ["cfc_correction"], 0.3],
+            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.3],
+        ]
+    elif name == "cfc_all_real":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.1],
+            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_text", ["cfc_text"], 0.05],
+            ["cfc_guided", ["cfc_guided"], 0.1],
+            ["cfc_correction", ["cfc_correction"], 0.1],
+            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.1],
+            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.15],
+            ["cfc_correction_real_b", ["cfc_correction_real_b"], 0.15],
+            ["cfc_correction_real_a", ["cfc_correction_real_a"], 0.15]
+        ]
     elif name in ["molmo_point", "molmo_point_long_context"]:
         pointing_high_res = 0.30
         point_weight = MessageWeight(weight=0.2, root_length=False, root_subsegments=False)
@@ -491,8 +523,8 @@ def main():
     parser.add_argument("mixture", default="0.0.1")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--model", default="video")
-    parser.add_argument("--train_split", default="train")
-    parser.add_argument("--val_split", default="validation")
+    parser.add_argument("--train_split", default="train-v2")
+    parser.add_argument("--val_split", default="validation-v2")
     parser.add_argument("--seq_len", type=int, default=16384)
     parser.add_argument("--device_batch_size", default=2, type=int)
     parser.add_argument("--max_loss_examples", default=64, type=int)
@@ -538,6 +570,14 @@ def main():
     elif args.mixture in INDIVIDUAL_DATASETS:
         loss_eval_tasks = [f'{args.mixture}:{args.val_split}']
         eval_tasks=[]
+    elif args.mixture in ["cfc_base", "cfc_all_synthetic", "cfc_all_real"]:
+        loss_eval_tasks = [f'{task}:{args.val_split}' for task in ["cfc_track", 
+                                                                "cfc_target", 
+                                                                "cfc_text", 
+                                                                "cfc_guided", 
+                                                                "cfc_correction", 
+                                                                "cfc_correction_incomplete"]]
+        eval_tasks = []
     else:
         loss_eval_tasks = []
         eval_tasks = []
@@ -660,7 +700,7 @@ def main():
         load_path=None,
         initial_model_checkpoint=checkpoint,
         save_interval=20,
-        save_num_checkpoints_to_keep=5,
+        save_num_checkpoints_to_keep=10,
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
