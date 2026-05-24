@@ -2246,6 +2246,16 @@ class VideoObjectTrackingEval(Evaluator):
 
             # Decode prediction to match GT format
             video_fps = metadata['video_fps'] # Used for converting time to frame index
+
+            # Subsample GT to pred cadence when sampling_fps known and < video_fps.
+            # Predictions emit at sampling_fps stride; GT built at native video_fps
+            # would otherwise count every unsampled frame as a false negative.
+            sampling_fps = metadata.get('sampling_fps')
+            if (sampling_fps and sampling_fps > 0 and video_fps > 0
+                    and sampling_fps < video_fps
+                    and video_fps % sampling_fps == 0):
+                stride = int(round(video_fps / sampling_fps))
+                gt_tracks = [g for g in gt_tracks if g['frame'] % stride == 0]
             if isinstance(pred_seq, list):
                 # Pre-parsed points (e.g. MolmoPoint): [[obj_id, time_sec, x, y], ...]
                 from collections import defaultdict as _defaultdict

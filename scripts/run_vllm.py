@@ -53,11 +53,21 @@ def _get_text_formatter():
     return _TEXT_FORMATTER
 
 
-def build_multi_turn_chat(raw):
+def build_multi_turn_chat(
+    raw,
+    video_path=None,
+    max_frames=None,
+    frame_sample_mode=None,
+    max_fps=None,
+    sampling_fps=None,
+):
     """Render a multi_turn_messages example into a chat list using the training formatter.
 
     For each turn, calls DataFormatter.get_user_prompt to produce the same (prompt, response)
     pair training would. Non-final turns emit user+assistant; final turn emits user only.
+
+    If video_path is given, a video content item is attached to the first user turn,
+    matching the (text, video) ordering produced by get_message().
     """
     formatter = _get_text_formatter()
     rng = _random.Random(0)
@@ -68,10 +78,18 @@ def build_multi_turn_chat(raw):
             turn, is_training=False, for_inference=False, rng=rng
         )
         style = turn.get("style", "demo")
-        chat.append({
-            "role": "user",
-            "content": [dict(type="text", text=prompt, style=style)],
-        })
+        content = [dict(type="text", text=prompt, style=style)]
+        if i == 0 and video_path is not None:
+            video_kwargs = {
+                "max_frames": max_frames,
+                "frame_sample_mode": frame_sample_mode,
+            }
+            if max_fps is not None:
+                video_kwargs["max_fps"] = max_fps
+            if sampling_fps is not None:
+                video_kwargs["sampling_fps"] = sampling_fps
+            content.append(dict(type="video", video=video_path, **video_kwargs))
+        chat.append({"role": "user", "content": content})
         if i < len(turns) - 1:
             chat.append({
                 "role": "assistant",
@@ -211,17 +229,28 @@ def build_vllm_input(example, style, prompt_override, processor, max_fps_overrid
     max_frames = processor.video_processor.num_frames
     max_fps = max_fps_override if max_fps_override is not None else processor.video_processor.max_fps
     default_sampling_fps = processor.video_processor.sampling_fps
+    effective_sampling_fps = sampling_fps if sampling_fps is not None else default_sampling_fps
 
-    messages = get_message(
-        images=None,
-        video_path=video_path,
-        max_frames=max_frames,
-        frame_sample_mode=frame_sample_mode,
-        max_fps=max_fps,
-        sampling_fps=sampling_fps if sampling_fps is not None else default_sampling_fps,
-        input_text=prompt_text,
-        style=effective_style,
-    )
+    if raw and "multi_turn_messages" in raw:
+        messages = build_multi_turn_chat(
+            raw,
+            video_path=video_path,
+            max_frames=max_frames,
+            frame_sample_mode=frame_sample_mode,
+            max_fps=max_fps,
+            sampling_fps=effective_sampling_fps,
+        )
+    else:
+        messages = get_message(
+            images=None,
+            video_path=video_path,
+            max_frames=max_frames,
+            frame_sample_mode=frame_sample_mode,
+            max_fps=max_fps,
+            sampling_fps=effective_sampling_fps,
+            input_text=prompt_text,
+            style=effective_style,
+        )
 
     images, videos_inputs, video_kwargs = process_vision_info(messages)
     multi_modal_data = {}

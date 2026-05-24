@@ -416,7 +416,7 @@ def get_training_mixture(name):
     elif name == "cfc_base":
         training_mixture = [
             ["cfc_track", ["cfc_track"], 0.5],
-            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.5],
+            ["cfc_correction", ["cfc_correction"], 0.5],
         ]
     elif name == "cfc_all_synthetic":
         training_mixture = [
