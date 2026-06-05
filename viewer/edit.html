@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Caption Review</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a1a; color: #e0e0e0; }
+
+.app { display: flex; height: 100vh; overflow: hidden; }
+
+/* Sidebar */
+.sidebar { width: 380px; min-width: 380px; background: #222; border-right: 1px solid #333; display: flex; flex-direction: column; }
+.sidebar-header { padding: 12px; border-bottom: 1px solid #333; display: flex; flex-direction: column; gap: 6px; }
+.sidebar-header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.sidebar-header .stat { font-size: 11px; color: #888; }
+.sidebar-header input,
+.sidebar-header select { width: 100%; padding: 6px 8px; background: #111; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 13px; }
+.sidebar-header label.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; cursor: pointer; }
+.list { overflow-y: auto; flex: 1; padding: 4px; }
+
+.vid-item { padding: 6px 8px; cursor: pointer; font-size: 12px; border-radius: 3px; margin: 1px 0; line-height: 1.3; display: flex; gap: 6px; align-items: baseline; word-break: break-all; }
+.vid-item:hover { background: #2a2a2a; }
+.vid-item.active { background: #1e3a5f; color: #fff; }
+.vid-item .check { color: #4ade80; font-weight: bold; width: 12px; flex-shrink: 0; }
+.vid-item .conf { font-size: 10px; padding: 1px 5px; border-radius: 2px; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.4px; }
+.conf.high { background: #14532d; color: #bbf7d0; }
+.conf.medium, .conf.med { background: #78350f; color: #fed7aa; }
+.conf.low { background: #7f1d1d; color: #fecaca; }
+.conf.other { background: #1f2937; color: #cbd5e1; }
+.vid-item .name { flex: 1; min-width: 0; }
+
+/* Main */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.edit-panel { background: #222; padding: 12px 16px; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+.edit-panel .meta-row { display: flex; gap: 10px; align-items: center; font-size: 12px; color: #aaa; flex-wrap: wrap; }
+.edit-panel .meta-row .vid { font-family: ui-monospace, monospace; color: #ddd; word-break: break-all; }
+.edit-panel .reasoning { font-size: 12px; color: #999; font-style: italic; background: #1a1a1a; padding: 6px 8px; border-radius: 3px; border: 1px solid #333; max-height: 6em; overflow: auto; }
+.edit-panel textarea { width: 100%; min-height: 80px; padding: 8px 10px; background: #111; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 13px; font-family: inherit; line-height: 1.4; resize: vertical; }
+.edit-panel textarea:focus { outline: none; border-color: #3b82f6; }
+.edit-panel .button-row { display: flex; gap: 8px; align-items: center; }
+.edit-panel button { padding: 7px 14px; border-radius: 3px; border: 1px solid #555; background: #333; color: #e0e0e0; cursor: pointer; font-size: 13px; font-weight: 500; }
+.edit-panel button:hover:not(:disabled) { background: #444; }
+.edit-panel button:disabled { opacity: 0.4; cursor: not-allowed; }
+.edit-panel button.primary { background: #1e40af; border-color: #3b82f6; }
+.edit-panel button.primary:hover:not(:disabled) { background: #2563eb; }
+.edit-panel button.confirm { background: #166534; border-color: #22c55e; }
+.edit-panel button.confirm:hover:not(:disabled) { background: #16a34a; }
+.edit-panel .status { font-size: 12px; color: #4ade80; }
+.edit-panel .status.fade { opacity: 0; transition: opacity 1s; }
+
+.placeholder { padding: 40px; color: #666; font-style: italic; text-align: center; }
+
+.viewer { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 12px; gap: 10px; }
+.frame-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 4px; overflow: hidden; position: relative; }
+#canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+.frame-info { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; }
+
+.controls { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.controls button { padding: 6px 12px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; cursor: pointer; font-size: 13px; }
+.controls button:hover:not(:disabled) { background: #444; }
+.controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+.controls input[type=range] { flex: 1; }
+.controls label.toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>Caption Review</h2>
+      <div class="stat" id="progress-stat">—</div>
+      <input id="filter" type="text" placeholder="Filter video id">
+      <select id="conf-filter">
+        <option value="">All confidences</option>
+      </select>
+      <label class="toggle">
+        <input type="checkbox" id="unreviewed-only">
+        Unreviewed only
+      </label>
+    </div>
+    <div id="list" class="list"></div>
+  </aside>
+  <main class="main">
+    <div id="edit-panel" class="placeholder">Pick a video from the sidebar.</div>
+    <section class="viewer" style="display:none" id="viewer-section">
+      <div class="frame-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="frame-info" class="frame-info"></div>
+      </div>
+      <div class="controls">
+        <button id="prev">&laquo; Prev</button>
+        <input id="slider" type="range" min="0" max="0" value="0" disabled>
+        <button id="next">Next &raquo;</button>
+        <label class="toggle">
+          <input type="checkbox" id="only-pred-frames" checked>
+          Only frames with predictions
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="show-masks" checked>
+          Show GT masks
+        </label>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+const POINT_COLOR = "#3b82f6";
+const POINT_RADIUS = 6;
+
+const state = {
+  videos: [],
+  meta: null,
+  currentId: null,
+  current: null,
+  frameList: [],
+  cursor: 0,
+  maskFrameSet: new Set(),
+};
+
+const els = {
+  list: document.getElementById("list"),
+  filter: document.getElementById("filter"),
+  confFilter: document.getElementById("conf-filter"),
+  unreviewedOnly: document.getElementById("unreviewed-only"),
+  progressStat: document.getElementById("progress-stat"),
+  editPanel: document.getElementById("edit-panel"),
+  viewerSection: document.getElementById("viewer-section"),
+  canvas: document.getElementById("canvas"),
+  frameInfo: document.getElementById("frame-info"),
+  prev: document.getElementById("prev"),
+  next: document.getElementById("next"),
+  slider: document.getElementById("slider"),
+  onlyPredFrames: document.getElementById("only-pred-frames"),
+  showMasks: document.getElementById("show-masks"),
+};
+
+const ctx = els.canvas.getContext("2d");
+
+async function init() {
+  state.meta = await (await fetch("/api/meta")).json();
+  for (const c of state.meta.confidences) {
+    const opt = document.createElement("option");
+    opt.value = c; opt.textContent = c;
+    els.confFilter.appendChild(opt);
+  }
+  state.videos = await (await fetch("/api/videos")).json();
+  renderSidebar();
+  updateProgressStat();
+  bindControls();
+}
+
+function updateProgressStat() {
+  const total = state.videos.length;
+  const done = state.videos.filter(v => v.reviewed).length;
+  els.progressStat.textContent = `${done} / ${total} reviewed`;
+}
+
+function confClass(c) {
+  c = (c || "").toLowerCase();
+  if (c === "high") return "high";
+  if (c === "medium" || c === "med") return "medium";
+  if (c === "low") return "low";
+  return "other";
+}
+
+function renderSidebar() {
+  const filter = els.filter.value.trim().toLowerCase();
+  const confF = els.confFilter.value;
+  const unreviewedOnly = els.unreviewedOnly.checked;
+  els.list.innerHTML = "";
+  for (const v of state.videos) {
+    if (filter && !v.video_id.toLowerCase().includes(filter)) continue;
+    if (confF && v.confidence !== confF) continue;
+    if (unreviewedOnly && v.reviewed) continue;
+    const it = document.createElement("div");
+    it.className = "vid-item";
+    if (v.video_id === state.currentId) it.classList.add("active");
+    it.dataset.videoId = v.video_id;
+    it.innerHTML =
+      `<span class="check">${v.reviewed ? "✓" : ""}</span>` +
+      `<span class="conf ${confClass(v.confidence)}">${escapeHtml(v.confidence || "?")}</span>` +
+      `<span class="name">${escapeHtml(v.video_id)}</span>`;
+    it.onclick = () => loadVideo(v.video_id);
+    els.list.appendChild(it);
+  }
+}
+
+function bindControls() {
+  els.filter.addEventListener("input", renderSidebar);
+  els.confFilter.addEventListener("change", renderSidebar);
+  els.unreviewedOnly.addEventListener("change", renderSidebar);
+  els.prev.onclick = () => moveCursor(-1);
+  els.next.onclick = () => moveCursor(1);
+  els.slider.oninput = (e) => {
+    state.cursor = parseInt(e.target.value, 10);
+    drawCurrentFrame();
+  };
+  els.onlyPredFrames.onchange = () => updateFrameList();
+  els.showMasks.onchange = () => drawCurrentFrame();
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        const btn = document.getElementById("btn-save-edit");
+        if (btn && !btn.disabled) btn.click();
+      }
+      return;
+    }
+    if (e.key === "ArrowLeft") moveCursor(-1);
+    else if (e.key === "ArrowRight") moveCursor(1);
+  });
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(drawCurrentFrame, 80);
+  });
+}
+
+async function loadVideo(videoId) {
+  try {
+    state.currentId = videoId;
+    for (const el of document.querySelectorAll(".vid-item.active"))
+      el.classList.remove("active");
+    const sel = document.querySelector(`.vid-item[data-video-id="${CSS.escape(videoId)}"]`);
+    if (sel) sel.classList.add("active");
+    const r = await fetch(`/api/video/${encodeURIComponent(videoId)}`);
+    if (!r.ok) throw new Error(`fetch ${r.status}`);
+    state.current = await r.json();
+    state.maskFrameSet = new Set(state.current.mask_frames || []);
+    els.showMasks.disabled = state.maskFrameSet.size === 0;
+    renderEditPanel();
+    els.viewerSection.style.display = "flex";
+    updateFrameList();
+  } catch (err) {
+    console.error("loadVideo failed:", err);
+    els.editPanel.className = "placeholder";
+    els.editPanel.textContent = `Load failed: ${err && err.message ? err.message : err}`;
+  }
+}
+
+function renderEditPanel() {
+  try {
+    const c = state.current;
+    const confC = confClass(c.confidence);
+    const reviewedHtml = c.reviewed
+      ? '<span style="color:#4ade80">✓ reviewed</span>'
+      : '<span style="color:#888">unreviewed</span>';
+    const reasoningHtml = c.reasoning
+      ? '<div class="reasoning"><b>reasoning:</b> ' + escapeHtml(c.reasoning) + '</div>'
+      : '';
+    const metaHtml =
+      '<div class="meta-row">' +
+        '<span class="conf ' + confC + '">' + escapeHtml(c.confidence || "?") + '</span>' +
+        '<span>expr: <b>' + escapeHtml(c.expression || "?") + '</b></span>' +
+        '<span>' + c.w + '×' + c.h + ' · fps=' + c.video_fps + '</span>' +
+        '<span>' + reviewedHtml + '</span>' +
+        '<span class="vid">' + escapeHtml(c.video_id) + '</span>' +
+      '</div>';
+    const formHtml =
+      '<textarea id="caption-text" rows="4"></textarea>' +
+      '<div class="button-row">' +
+        '<button class="confirm" id="btn-confirm">Confirm original</button>' +
+        '<button class="primary" id="btn-save-edit">Save edit</button>' +
+        '<span class="status" id="save-status"></span>' +
+      '</div>';
+    els.editPanel.className = "edit-panel";
+    els.editPanel.innerHTML = metaHtml + reasoningHtml + formHtml;
+
+    const ta = document.getElementById("caption-text");
+    ta.value = c.current_caption || "";
+    const btnConfirm = document.getElementById("btn-confirm");
+    const btnEdit = document.getElementById("btn-save-edit");
+    const updateButtons = () => {
+      btnEdit.disabled = ta.value === c.original_correction;
+    };
+    ta.addEventListener("input", updateButtons);
+    updateButtons();
+    btnConfirm.onclick = () => save(c.original_correction);
+    btnEdit.onclick = () => save(ta.value);
+  } catch (err) {
+    console.error("renderEditPanel failed:", err);
+    els.editPanel.className = "placeholder";
+    els.editPanel.textContent = `Render failed: ${err && err.message ? err.message : err}`;
+  }
+}
+
+async function save(caption) {
+  const r = await fetch("/api/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({video_id: state.currentId, caption}),
+  });
+  if (!r.ok) {
+    document.getElementById("save-status").textContent = "save failed";
+    return;
+  }
+  const result = await r.json();
+  const status = document.getElementById("save-status");
+  status.classList.remove("fade");
+  status.textContent = `Saved ✓ — ${result.reviewed_count} reviewed`;
+  setTimeout(() => status.classList.add("fade"), 100);
+
+  // Update local state
+  const vEntry = state.videos.find(v => v.video_id === state.currentId);
+  if (vEntry) vEntry.reviewed = true;
+  state.current.reviewed = true;
+  state.current.current_caption = caption;
+  renderSidebar();
+  updateProgressStat();
+  // Re-render meta-row reviewed indicator
+  const ta = document.getElementById("caption-text");
+  const savedVal = ta ? ta.value : caption;
+  renderEditPanel();
+  const ta2 = document.getElementById("caption-text");
+  if (ta2) ta2.value = caption;
+  document.getElementById("save-status").textContent =
+    `Saved ✓ — ${result.reviewed_count} reviewed`;
+}
+
+function updateFrameList() {
+  const c = state.current;
+  if (!c) return;
+  if (els.onlyPredFrames.checked) {
+    const idxs = Object.keys(c.frames_with_preds || {}).map(Number);
+    const onDisk = new Set(c.available_frames);
+    state.frameList = idxs.filter(f => onDisk.has(f)).sort((a, b) => a - b);
+    if (state.frameList.length === 0) state.frameList = c.available_frames.slice();
+  } else {
+    state.frameList = c.available_frames.slice();
+  }
+  state.cursor = 0;
+  els.slider.disabled = state.frameList.length === 0;
+  els.slider.min = 0;
+  els.slider.max = Math.max(0, state.frameList.length - 1);
+  els.slider.value = 0;
+  drawCurrentFrame();
+}
+
+function moveCursor(delta) {
+  if (state.frameList.length === 0) return;
+  state.cursor = Math.max(0, Math.min(state.frameList.length - 1, state.cursor + delta));
+  els.slider.value = state.cursor;
+  drawCurrentFrame();
+}
+
+async function drawCurrentFrame() {
+  const c = state.current;
+  if (!c || state.frameList.length === 0) return;
+  const frameIdx = state.frameList[state.cursor];
+  const img = new Image();
+  img.onload = () => {
+    els.canvas.width = c.w;
+    els.canvas.height = c.h;
+    ctx.drawImage(img, 0, 0, c.w, c.h);
+    const cw = els.canvas.clientWidth;
+    const scale = cw > 0 ? els.canvas.width / cw : 1;
+    const pts = (c.frames_with_preds || {})[String(frameIdx)] || [];
+    const t = (frameIdx / c.video_fps).toFixed(2);
+    els.frameInfo.textContent =
+      `frame ${frameIdx} · t=${t}s · ${pts.length} pt${pts.length === 1 ? "" : "s"} · ` +
+      `[${state.cursor + 1}/${state.frameList.length}]`;
+
+    const wantMask = els.showMasks.checked && state.maskFrameSet.has(frameIdx);
+    if (wantMask) {
+      const maskImg = new Image();
+      maskImg.onload = () => {
+        ctx.drawImage(maskImg, 0, 0, c.w, c.h);
+        drawPoints(pts, scale);
+      };
+      maskImg.onerror = () => drawPoints(pts, scale);
+      maskImg.src = `/api/masks/${encodeURIComponent(c.video_id)}/${frameIdx}`;
+    } else {
+      drawPoints(pts, scale);
+    }
+  };
+  img.onerror = () => {
+    ctx.fillStyle = "#400";
+    ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+    els.frameInfo.textContent = `frame ${frameIdx}: load failed`;
+  };
+  img.src = `/api/frame/${encodeURIComponent(c.video_id)}/${frameIdx}`;
+}
+
+function drawPoints(points, scale = 1) {
+  const r = POINT_RADIUS * scale;
+  const lw = 1.5 * scale;
+  const fontPx = 14 * scale;
+  ctx.save();
+  for (const p of points) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = POINT_COLOR;
+    ctx.globalAlpha = 0.75;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = lw;
+    ctx.stroke();
+    const label = String(p.obj_id);
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    const tw = ctx.measureText(label).width;
+    const lx = p.x + r + 3 * scale;
+    const ly = p.y - r;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(lx - 2 * scale, ly - fontPx, tw + 4 * scale, fontPx + 2 * scale);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, lx, ly - 2 * scale);
+  }
+  ctx.restore();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+init();
+</script>
+</body>
+</html>

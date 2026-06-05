@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Molmo2 Predictions Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a1a; color: #e0e0e0; }
+
+.app { display: flex; height: 100vh; overflow: hidden; }
+
+/* Sidebar */
+.sidebar { width: 360px; min-width: 360px; background: #222; border-right: 1px solid #333; display: flex; flex-direction: column; }
+.sidebar-header { padding: 12px; border-bottom: 1px solid #333; }
+.sidebar-header h2 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600; }
+.sidebar-header input,
+.sidebar-header select { width: 100%; padding: 6px 8px; background: #111; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 13px; }
+.sidebar-header select { margin-top: 6px; }
+.list { overflow-y: auto; flex: 1; padding: 4px; }
+
+.video-group { margin-bottom: 4px; }
+.video-header { padding: 6px 8px; background: #2a2a2a; border-radius: 3px; cursor: pointer; font-size: 12px; color: #aaa; word-break: break-all; user-select: none; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.video-header:hover { background: #333; }
+.video-header .name { flex: 1; min-width: 0; }
+.video-header .badges { color: #777; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.video-header .badges b { color: #bbb; font-weight: 600; }
+.video-items { padding-left: 8px; margin-top: 2px; display: none; }
+.video-group.open .video-items { display: block; }
+.video-group.open .video-header { background: #333; color: #ccc; }
+
+.prompt-item { padding: 6px 8px; cursor: pointer; font-size: 13px; border-radius: 3px; margin: 1px 0; line-height: 1.3; }
+.prompt-item:hover { background: #2a2a2a; }
+.prompt-item.active { background: #1e3a5f; color: #fff; }
+
+/* Main pane */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.topbar { background: #222; padding: 12px 16px; border-bottom: 1px solid #333; flex-shrink: 0; }
+.meta .placeholder { color: #666; font-style: italic; }
+.meta .video-name { font-size: 12px; color: #888; word-break: break-all; }
+.meta .expression { font-size: 16px; font-weight: 600; margin-top: 4px; color: #fff; }
+.meta .prompt { margin-top: 8px; font-size: 12px; color: #aaa; max-height: 8em; overflow: auto; white-space: pre-wrap; background: #1a1a1a; padding: 6px 8px; border-radius: 3px; border: 1px solid #333; }
+
+.viewer { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 16px; gap: 12px; }
+.frame-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 4px; overflow: hidden; position: relative; }
+#canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+.frame-info { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; }
+
+.controls { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.controls button { padding: 6px 12px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; cursor: pointer; font-size: 13px; }
+.controls button:hover:not(:disabled) { background: #444; }
+.controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+.controls input[type=range] { flex: 1; }
+.controls label.toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa; cursor: pointer; }
+
+/* Step bar */
+.step-bar { display: none; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.step-bar.visible { display: flex; }
+.step-buttons { display: flex; gap: 6px; }
+.step-btn { flex: 1; padding: 8px 12px; background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; cursor: pointer; font-size: 13px; text-align: left; line-height: 1.3; }
+.step-btn:hover { background: #333; }
+.step-btn.active { background: #1e3a5f; border-color: #3b82f6; color: #fff; }
+.step-btn .step-label { font-weight: 600; font-size: 11px; color: #8aa9d6; text-transform: uppercase; letter-spacing: 0.5px; }
+.step-btn.active .step-label { color: #9ec1f1; }
+.step-btn .step-body { font-size: 12px; margin-top: 2px; max-height: 4em; overflow: auto; white-space: pre-wrap; }
+.step-btn .step-meta { font-size: 11px; color: #888; margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+.timestamp-bar { font-size: 14px; color: #fff; font-variant-numeric: tabular-nums; background: #2a2a2a; padding: 6px 10px; border-radius: 3px; border: 1px solid #333; }
+.timestamp-bar b { color: #9ec1f1; font-weight: 600; }
+
+.caption-box { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 8px 12px; font-size: 13px; color: #ddd; line-height: 1.4; flex-shrink: 0; display: none; }
+.caption-box.visible { display: block; }
+.caption-box .label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2 id="sidebar-title">Predictions</h2>
+      <input id="filter" type="text" placeholder="Filter videos / prompts">
+      <select id="sort">
+        <option value="name">Sort: name (A-Z)</option>
+        <option value="n_prompts">Sort: prompts (most first)</option>
+        <option value="n_fish">Sort: fish (most first)</option>
+        <option value="n_frames">Sort: length (longest first)</option>
+      </select>
+    </div>
+    <div id="list" class="list"></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div id="meta" class="meta">
+        <div class="placeholder">Pick a prompt from the sidebar.</div>
+      </div>
+    </header>
+    <section class="viewer">
+      <div id="caption-box" class="caption-box">
+        <div class="label">Caption</div>
+        <div id="caption-text"></div>
+      </div>
+      <div id="step-bar" class="step-bar">
+        <div class="step-buttons">
+          <div class="step-btn" id="step-initial" data-step="initial">
+            <div class="step-label">Step 1 — Initial output</div>
+            <div class="step-body" id="step-initial-body">(original annotation)</div>
+            <div class="step-meta" id="step-initial-meta"></div>
+          </div>
+          <div class="step-btn" id="step-prediction" data-step="prediction">
+            <div class="step-label">Step 2 — After correction</div>
+            <div class="step-body" id="step-prediction-body">(model prediction)</div>
+            <div class="step-meta" id="step-prediction-meta"></div>
+          </div>
+        </div>
+        <div class="timestamp-bar" id="timestamp-bar">
+          <b>t</b> — &middot; <b>frame</b> — &middot; <b>step</b> —
+        </div>
+      </div>
+      <div class="frame-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="frame-info" class="frame-info"></div>
+      </div>
+      <div class="controls">
+        <button id="prev">&laquo; Prev</button>
+        <input id="slider" type="range" min="0" max="0" value="0" disabled>
+        <button id="next">Next &raquo;</button>
+        <label class="toggle">
+          <input type="checkbox" id="only-pred-frames" checked>
+          Only frames with predictions
+        </label>
+        <label class="toggle" id="show-masks-label">
+          <input type="checkbox" id="show-masks">
+          Show GT masks
+        </label>
+        <label class="toggle" id="show-bboxes-label" style="display:none">
+          <input type="checkbox" id="show-bboxes" checked>
+          Show GT bboxes
+        </label>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+const POINT_COLOR = "#3b82f6"; // blue
+const INIT_POINT_COLOR = "#f59e0b"; // amber for initial-step points
+const POINT_RADIUS = 6;
+const GT_BBOX_COLOR = "#22c55e"; // green
+const GT_BBOX_FILL_ALPHA = 0.20;
+
+const state = {
+  index: [],
+  currentExampleId: null,
+  current: null,
+  currentFrameList: [],
+  cursor: 0,
+  gtOnly: false,
+  textMode: false,
+  hasCaptions: false,
+  step: "prediction", // "initial" | "prediction"
+};
+
+const els = {
+  list: document.getElementById("list"),
+  filter: document.getElementById("filter"),
+  sort: document.getElementById("sort"),
+  meta: document.getElementById("meta"),
+  canvas: document.getElementById("canvas"),
+  frameInfo: document.getElementById("frame-info"),
+  prev: document.getElementById("prev"),
+  next: document.getElementById("next"),
+  slider: document.getElementById("slider"),
+  onlyPredFrames: document.getElementById("only-pred-frames"),
+  showMasks: document.getElementById("show-masks"),
+  showMasksLabel: document.getElementById("show-masks-label"),
+  showBboxes: document.getElementById("show-bboxes"),
+  showBboxesLabel: document.getElementById("show-bboxes-label"),
+  sidebarTitle: document.getElementById("sidebar-title"),
+  stepBar: document.getElementById("step-bar"),
+  stepInitial: document.getElementById("step-initial"),
+  stepPrediction: document.getElementById("step-prediction"),
+  stepInitialMeta: document.getElementById("step-initial-meta"),
+  stepPredictionMeta: document.getElementById("step-prediction-meta"),
+  stepInitialBody: document.getElementById("step-initial-body"),
+  stepPredictionBody: document.getElementById("step-prediction-body"),
+  timestampBar: document.getElementById("timestamp-bar"),
+  captionBox: document.getElementById("caption-box"),
+  captionText: document.getElementById("caption-text"),
+};
+
+const ctx = els.canvas.getContext("2d");
+
+async function init() {
+  const meta = await (await fetch("/api/meta")).json();
+  state.gtOnly = !!meta.gt_only;
+  state.textMode = !!meta.text_mode;
+  state.hasCaptions = !!meta.has_captions;
+  if (state.gtOnly) {
+    els.sidebarTitle.textContent = "GT Masks";
+    els.onlyPredFrames.checked = false;
+    els.onlyPredFrames.disabled = true;
+    els.showMasks.checked = true;
+  }
+  if (state.textMode) {
+    els.sidebarTitle.textContent = "Corrections";
+    els.stepBar.classList.add("visible");
+  }
+  const r = await fetch("/api/predictions");
+  state.index = await r.json();
+  renderSidebar();
+  bindControls();
+}
+
+function renderSidebar() {
+  const filter = els.filter.value.trim().toLowerCase();
+  const sortKey = els.sort.value;
+  els.list.innerHTML = "";
+
+  const groups = state.index.slice();
+  if (sortKey === "name") {
+    groups.sort((a, b) => a.video.localeCompare(b.video));
+  } else {
+    groups.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0)
+      || a.video.localeCompare(b.video));
+  }
+
+  for (const group of groups) {
+    const items = group.items.filter(it =>
+      !filter || group.video.toLowerCase().includes(filter) ||
+      (it.expression || "").toLowerCase().includes(filter) ||
+      (it.correction_text || "").toLowerCase().includes(filter));
+    if (items.length === 0) continue;
+
+    const groupEl = document.createElement("div");
+    groupEl.className = "video-group";
+
+    const header = document.createElement("div");
+    header.className = "video-header";
+    header.innerHTML =
+      `<span class="name">${escapeHtml(group.video)}</span>` +
+      `<span class="badges">` +
+      `<b>P</b>${group.n_prompts ?? items.length} ` +
+      `<b>F</b>${group.n_fish ?? "?"} ` +
+      `<b>L</b>${group.n_frames ?? "?"}` +
+      `</span>`;
+    header.onclick = () => groupEl.classList.toggle("open");
+    groupEl.appendChild(header);
+
+    const itemsEl = document.createElement("div");
+    itemsEl.className = "video-items";
+    for (const it of items) {
+      const itEl = document.createElement("div");
+      itEl.className = "prompt-item";
+      itEl.textContent = it.expression || "(no expression)";
+      itEl.dataset.exampleId = it.example_id;
+      itEl.onclick = () => loadExample(it.example_id);
+      itemsEl.appendChild(itEl);
+    }
+    groupEl.appendChild(itemsEl);
+
+    if (filter) groupEl.classList.add("open");
+    els.list.appendChild(groupEl);
+  }
+}
+
+function bindControls() {
+  els.filter.addEventListener("input", renderSidebar);
+  els.sort.addEventListener("change", renderSidebar);
+  els.prev.onclick = () => moveCursor(-1);
+  els.next.onclick = () => moveCursor(1);
+  els.slider.oninput = (e) => {
+    state.cursor = parseInt(e.target.value, 10);
+    drawCurrentFrame();
+  };
+  els.onlyPredFrames.onchange = () => updateFrameList();
+  els.showMasks.onchange = () => drawCurrentFrame();
+  if (els.showBboxes) els.showBboxes.onchange = () => drawCurrentFrame();
+  els.stepInitial.onclick = () => setStep("initial");
+  els.stepPrediction.onclick = () => setStep("prediction");
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if (e.key === "ArrowLeft") moveCursor(-1);
+    else if (e.key === "ArrowRight") moveCursor(1);
+    else if (state.textMode && (e.key === "1" || e.key === "2")) {
+      setStep(e.key === "1" ? "initial" : "prediction");
+    }
+  });
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(drawCurrentFrame, 80);
+  });
+}
+
+function setStep(step) {
+  if (state.step === step) return;
+  state.step = step;
+  els.stepInitial.classList.toggle("active", step === "initial");
+  els.stepPrediction.classList.toggle("active", step === "prediction");
+  updateFrameList();
+}
+
+async function loadExample(exampleId) {
+  state.currentExampleId = exampleId;
+  for (const el of document.querySelectorAll(".prompt-item.active"))
+    el.classList.remove("active");
+  const sel = document.querySelector(`.prompt-item[data-example-id="${CSS.escape(exampleId)}"]`);
+  if (sel) sel.classList.add("active");
+
+  const r = await fetch(`/api/predictions/${encodeURIComponent(exampleId)}`);
+  if (!r.ok) {
+    console.error("load failed", r.status);
+    return;
+  }
+  state.current = await r.json();
+  state.maskFrameSet = new Set(state.current.mask_frames || []);
+  els.showMasks.disabled = state.maskFrameSet.size === 0;
+  if (state.textMode) {
+    state.step = "prediction";
+    els.stepInitial.classList.remove("active");
+    els.stepPrediction.classList.add("active");
+    renderStepBar();
+  }
+  renderMeta();
+  updateFrameList();
+}
+
+function _stepFrameSet(c) {
+  return state.step === "initial" ? c.frames_with_initial_pred : c.frames_with_preds;
+}
+
+function _summarizeFrames(frameMap, videoFps) {
+  const entries = Object.entries(frameMap || {});
+  if (entries.length === 0) return { count: 0, range: "—" };
+  const ts = entries.map(([f]) => Number(f) / videoFps);
+  ts.sort((a, b) => a - b);
+  let totalPts = 0;
+  for (const [, arr] of entries) totalPts += arr.length;
+  return {
+    count: entries.length,
+    pts: totalPts,
+    range: `t=${ts[0].toFixed(1)}s–${ts[ts.length - 1].toFixed(1)}s`,
+  };
+}
+
+function renderStepBar() {
+  const c = state.current;
+  if (!c || !state.textMode) return;
+  const init = _summarizeFrames(c.frames_with_initial_pred, c.video_fps);
+  const pred = _summarizeFrames(c.frames_with_preds, c.video_fps);
+  els.stepInitialMeta.textContent =
+    `${init.count} frames · ${init.pts || 0} pts · ${init.range}`;
+  els.stepPredictionMeta.textContent =
+    `${pred.count} frames · ${pred.pts || 0} pts · ${pred.range}`;
+  els.stepInitialBody.textContent =
+    c.initial_text || "(no initial annotation)";
+  const correction = c.correction_text || "(no correction prompt)";
+  const finalPred = c.prediction_text || "(no prediction)";
+  els.stepPredictionBody.textContent =
+    `User: ${correction}\nModel: ${finalPred}`;
+}
+
+function renderMeta() {
+  const c = state.current;
+  const predFrames = Object.keys(c.frames_with_preds).length;
+  const totalPredPoints = Object.values(c.frames_with_preds)
+    .reduce((s, arr) => s + arr.length, 0);
+  let stats;
+  if (state.gtOnly) {
+    stats = `${c.mask_frames.length} frames with GT masks &middot; ${c.available_frames.length} frames on disk`;
+  } else if (state.textMode) {
+    const init = Object.keys(c.frames_with_initial_pred || {}).length;
+    const gt = Object.keys(c.gt_bboxes_by_frame || {}).length;
+    stats = `${init} init frames &middot; ${predFrames} pred frames &middot; ` +
+      `${gt} GT bbox frames &middot; ${c.available_frames.length} frames on disk`;
+  } else {
+    stats = `${predFrames} frames with predictions &middot; ${totalPredPoints} total points &middot; ` +
+      `${c.available_frames.length} frames on disk`;
+  }
+  let promptLine = "";
+  if (!state.gtOnly && !state.textMode) {
+    promptLine = `<div class="prompt">${escapeHtml(c.prompt || "(no prompt)")}</div>`;
+  }
+  els.meta.innerHTML = `
+    <div class="video-name">${escapeHtml(c.video)} &middot; ${c.w}x${c.h} &middot; video_fps=${c.video_fps}</div>
+    <div class="expression">${escapeHtml(c.expression || "(no expression)")}</div>
+    ${promptLine}
+    <div class="video-name" style="margin-top:6px">${stats}</div>
+  `;
+  if (state.hasCaptions) {
+    const cap = c.caption || "";
+    els.captionText.textContent = cap;
+    els.captionBox.classList.toggle("visible", cap.length > 0);
+  } else {
+    els.captionBox.classList.remove("visible");
+  }
+}
+
+function updateFrameList() {
+  const c = state.current;
+  if (!c) return;
+  const activeFrames = state.textMode ? _stepFrameSet(c) : c.frames_with_preds;
+  if (els.onlyPredFrames.checked) {
+    const predFrameIdxs = Object.keys(activeFrames || {}).map(Number);
+    const onDisk = new Set(c.available_frames);
+    state.currentFrameList = predFrameIdxs.filter(f => onDisk.has(f)).sort((a, b) => a - b);
+    if (state.currentFrameList.length === 0) {
+      state.currentFrameList = c.available_frames.slice();
+    }
+  } else {
+    state.currentFrameList = c.available_frames.slice();
+  }
+  state.cursor = 0;
+  els.slider.disabled = state.currentFrameList.length === 0;
+  els.slider.min = 0;
+  els.slider.max = Math.max(0, state.currentFrameList.length - 1);
+  els.slider.value = 0;
+  drawCurrentFrame();
+}
+
+function moveCursor(delta) {
+  if (state.currentFrameList.length === 0) return;
+  state.cursor = Math.max(0, Math.min(state.currentFrameList.length - 1, state.cursor + delta));
+  els.slider.value = state.cursor;
+  drawCurrentFrame();
+}
+
+async function drawCurrentFrame() {
+  const c = state.current;
+  if (!c || state.currentFrameList.length === 0) return;
+  const frameIdx = state.currentFrameList[state.cursor];
+  const url = `/api/frame/${encodeURIComponent(c.video)}/${frameIdx}`;
+  const img = new Image();
+  img.onload = () => {
+    els.canvas.width = c.w;
+    els.canvas.height = c.h;
+    ctx.drawImage(img, 0, 0, c.w, c.h);
+    const cw = els.canvas.clientWidth;
+    const scale = cw > 0 ? els.canvas.width / cw : 1;
+    const activeFrames = state.textMode ? _stepFrameSet(c) : c.frames_with_preds;
+    const pts = (activeFrames || {})[String(frameIdx)] || [];
+    const t = (frameIdx / c.video_fps).toFixed(2);
+    const stepLabel = state.textMode
+      ? (state.step === "initial" ? "init" : "pred")
+      : "pred";
+    els.frameInfo.textContent =
+      `frame ${frameIdx} · t=${t}s · ${pts.length} ${stepLabel} pt${pts.length === 1 ? "" : "s"} · ` +
+      `[${state.cursor + 1}/${state.currentFrameList.length}]`;
+    if (state.textMode && els.timestampBar) {
+      els.timestampBar.innerHTML =
+        `<b>t</b> ${t}s &middot; <b>frame</b> ${frameIdx} &middot; ` +
+        `<b>step</b> ${state.step === "initial" ? "1 (initial)" : "2 (after correction)"}`;
+    }
+
+    const wantMask = els.showMasks.checked && state.maskFrameSet.has(frameIdx);
+    if (wantMask) {
+      const maskImg = new Image();
+      maskImg.onload = () => {
+        ctx.drawImage(maskImg, 0, 0, c.w, c.h);
+        drawPoints(pts, scale, state.step === "initial");
+      };
+      maskImg.onerror = () => drawPoints(pts, scale, state.step === "initial");
+      maskImg.src = `/api/masks/${encodeURIComponent(c.example_id)}/${frameIdx}`;
+    } else {
+      drawPoints(pts, scale, state.textMode && state.step === "initial");
+    }
+  };
+  img.onerror = () => {
+    ctx.fillStyle = "#400";
+    ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+    els.frameInfo.textContent = `frame ${frameIdx}: load failed`;
+  };
+  img.src = url;
+}
+
+function drawBboxes(bboxes, scale = 1) {
+  const lw = 2 * scale;
+  ctx.save();
+  for (const b of bboxes) {
+    const [x, y, w, h] = b;
+    ctx.fillStyle = GT_BBOX_COLOR;
+    ctx.globalAlpha = GT_BBOX_FILL_ALPHA;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = GT_BBOX_COLOR;
+    ctx.lineWidth = lw;
+    ctx.strokeRect(x, y, w, h);
+  }
+  ctx.restore();
+}
+
+function drawPoints(points, scale = 1, isInitial = false) {
+  const r = POINT_RADIUS * scale;
+  const lw = 1.5 * scale;
+  const fontPx = 14 * scale;
+  const color = isInitial ? INIT_POINT_COLOR : POINT_COLOR;
+  ctx.save();
+  for (const p of points) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.75;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = lw;
+    ctx.stroke();
+    // Label with obj_id (background pill for readability)
+    const label = String(p.obj_id);
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    const tw = ctx.measureText(label).width;
+    const lx = p.x + r + 3 * scale;
+    const ly = p.y - r;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(lx - 2 * scale, ly - fontPx, tw + 4 * scale, fontPx + 2 * scale);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, lx, ly - 2 * scale);
+  }
+  ctx.restore();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+init();
+</script>
+</body>
+</html>
