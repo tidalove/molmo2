@@ -183,7 +183,11 @@ INDIVIDUAL_DATASETS = {
     "cfc_text": "tracking",
     "cfc_correction": "tracking",
     "cfc_correction_incomplete": "tracking",
-    "cfc_correction_real": "tracking",
+    "cfc_correction_real_a": "tracking",
+    "cfc_correction_real_b": "tracking",
+    "cfc_correction_real_c": "tracking",
+    "cfc_correction_a": "tracking",
+    "cfc_correction_b": "tracking",
 }
 
 
@@ -427,17 +431,36 @@ def get_training_mixture(name):
             ["cfc_correction", ["cfc_correction"], 0.3],
             ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.3],
         ]
+    elif name == "cfc_all_synthetic_a":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.1],
+            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_text", ["cfc_text"], 0.1],
+            ["cfc_correction", ["cfc_correction"], 0.15],
+            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.15],
+            ["cfc_correction_a", ["cfc_correction_a"], 0.25],
+            ["cfc_correction_b", ["cfc_correction_b"], 0.15],
+        ]
+    elif name == "cfc_all_synthetic_b":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.1],
+            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_text", ["cfc_text"], 0.1],
+            ["cfc_correction", ["cfc_correction"], 0.2],
+            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.2],
+            ["cfc_correction_b", ["cfc_correction_b"], 0.3],
+        ]
     elif name == "cfc_all_real":
         training_mixture = [
             ["cfc_track", ["cfc_track"], 0.1],
             ["cfc_target", ["cfc_target"], 0.1],
-            ["cfc_text", ["cfc_text"], 0.05],
-            ["cfc_guided", ["cfc_guided"], 0.1],
+            # ["cfc_text", ["cfc_text"], 0.05],
+            # ["cfc_guided", ["cfc_guided"], 0.1],
             ["cfc_correction", ["cfc_correction"], 0.1],
             ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.1],
-            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.15],
-            ["cfc_correction_real_b", ["cfc_correction_real_b"], 0.15],
-            ["cfc_correction_real_a", ["cfc_correction_real_a"], 0.15]
+            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.2],
+            ["cfc_correction_real_b", ["cfc_correction_real_b"], 0.2],
+            ["cfc_correction_real_a", ["cfc_correction_real_a"], 0.2]
         ]
     elif name in ["molmo_point", "molmo_point_long_context"]:
         pointing_high_res = 0.30
@@ -570,13 +593,20 @@ def main():
     elif args.mixture in INDIVIDUAL_DATASETS:
         loss_eval_tasks = [f'{args.mixture}:{args.val_split}']
         eval_tasks=[]
-    elif args.mixture in ["cfc_base", "cfc_all_synthetic", "cfc_all_real"]:
-        loss_eval_tasks = [f'{task}:{args.val_split}' for task in ["cfc_track", 
-                                                                "cfc_target", 
-                                                                "cfc_text", 
-                                                                "cfc_guided", 
-                                                                "cfc_correction", 
-                                                                "cfc_correction_incomplete"]]
+    elif args.mixture in ["cfc_base", "cfc_all_synthetic", "cfc_all_real", "cfc_all_synthetic_a", "cfc_all_synthetic_b"]:
+        loss_eval_tasks = [f'{task}:{args.val_split}' for task in [
+                                                                # "cfc_track", 
+                                                                # "cfc_target", 
+                                                                # "cfc_text", 
+                                                                # "cfc_guided", 
+                                                                # "cfc_correction", 
+                                                                # "cfc_correction_incomplete",
+                                                                # "cfc_correction_a",
+                                                                # "cfc_correction_b",
+                                                                "cfc_correction_real_a",
+                                                                "cfc_correction_real_b",
+                                                                # "cfc_correction_real_c",
+                                                                ]]
         eval_tasks = []
     else:
         loss_eval_tasks = []
@@ -633,11 +663,11 @@ def main():
             for_inference=False,
             device_batch_size=args.device_batch_size,
             max_examples=args.max_loss_examples,
-            num_workers=num_workers,
+            num_workers=num_workers // 2,
         )
         evaluation.data.max_text_seq_len = None
         evaluation.data.pad = "to_max"
-        evaluation.data.persistent_workers = True
+        evaluation.data.persistent_workers = False
         evaluation.data.prefetch_factor = args.prefetch_factor
         loss_evaluations.append(evaluation)
 
@@ -704,7 +734,7 @@ def main():
         global_train_batch_size=get_world_size() if args.debug else 128,
         device_train_microbatch_size=args.device_batch_size,
         time_limit=None,
-        max_duration=200,
+        max_duration=300,
         stop_at="${max_duration}",
         max_grad_norm=1,
         batch_divisor=BatchDivisor.global_batch,
