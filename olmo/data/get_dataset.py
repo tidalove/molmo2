@@ -20,6 +20,8 @@ from olmo.data.academic_video_datasets import (
 from olmo.data.academic_video_track_datasets import (
     PanAf, PanAfICL, PanAfGuided, CFC, CFCText, CFCMultiTurn, CFCGuided, CFCTargeted,
     CFCCorrection, CFCCorrectionIncomplete, CFCCorrectionReal,
+    CFCCorrectionA, CFCCorrectionB, CFCCorrectionRealA, CFCCorrectionRealB,
+    CFCCorrectionRealAYoloSort, CFCCorrectionKenaiChannel,
     Mevis, MevisCaption, MevisChallenge, Burst, ReasonVOS, RefYoutubeVOS, RefDavis17,
     LVVIS, YTVIS, ViCaS, ReVOS, MoCA,
     LVOSv1, LVOSv2, LaSOT, UWCOT, WebUOT, LaTOT, TNL2K, TNLLT,
@@ -472,14 +474,38 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         return CFCCorrection(split=split, task="track")
     if dataset_name == "cfc_correction_eval_2fps":
         return CFCCorrection(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_a":
+        return CFCCorrectionA(split=split, task="track")
+    if dataset_name == "cfc_correction_b":
+        return CFCCorrectionB(split=split, task="track")
+    if dataset_name == "cfc_correction_a_eval_2fps":
+        return CFCCorrectionA(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_b_eval_2fps":
+        return CFCCorrectionB(split=split, task="track", sampling_fps=2)
     if dataset_name == "cfc_correction_incomplete":
         return CFCCorrectionIncomplete(split=split, task="track")
     if dataset_name == "cfc_correction_incomplete_eval_2fps":
         return CFCCorrectionIncomplete(split=split, task="track", sampling_fps=2)
-    if dataset_name == "cfc_correction_real":
+    if dataset_name == "cfc_correction_real_c":
         return CFCCorrectionReal(split=split, task="track")
-    if dataset_name == "cfc_correction_real_eval_2fps":
+    if dataset_name == "cfc_correction_real_c_eval_2fps":
         return CFCCorrectionReal(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_real_a":
+        return CFCCorrectionRealA(split=split, task="track")
+    if dataset_name == "cfc_correction_real_a_eval_2fps":
+        return CFCCorrectionRealA(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_real_a_yolosort":
+        return CFCCorrectionRealAYoloSort(split=split, task="track")
+    if dataset_name == "cfc_correction_real_a_yolosort_eval_2fps":
+        return CFCCorrectionRealAYoloSort(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_kenai_channel":
+        return CFCCorrectionKenaiChannel(split=split, task="track")
+    if dataset_name == "cfc_correction_kenai_channel_eval_2fps":
+        return CFCCorrectionKenaiChannel(split=split, task="track", sampling_fps=2)
+    if dataset_name == "cfc_correction_real_b":
+        return CFCCorrectionRealB(split=split, task="track")
+    if dataset_name == "cfc_correction_real_b_eval_2fps":
+        return CFCCorrectionRealB(split=split, task="track", sampling_fps=2)
     # mevis: track, ground, single_point_track
     if dataset_name == "mevis_track": # Uses [1,2] sampling fps by default.
         return Mevis(split=split, task="track")
