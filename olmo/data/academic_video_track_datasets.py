@@ -1074,6 +1074,8 @@ class CFC(LocalTrackingDataset):
         "all-rivers": "all-rivers",
         "all-rivers-short": "all-rivers-short",
         "all-rivers-easy": "all-rivers-easy",
+        # kenai-channel held-out test river (v1.1 clip set, eval-only)
+        "channel": "kenai-channel",
         # v1 (chunking aug) — data lives in CFCv1/ tree
         "train-v1": "all-rivers-train-v1",
         "validation-v1": "all-rivers-val-v1",
@@ -1947,6 +1949,19 @@ class CFCMultiTurn(CFC):
                 'min_fps': ex['sampling_fps'],
             }
 
+        if self.is_eval:
+            points_list = ex['points_list']
+            metadata['points'] = points_list[-1]
+            metadata['initial_points'] = points_list[0]
+            metadata['mask_id'] = ex['mask_id']
+            metadata['video'] = ex['video']
+            masks_path = join(self.video_home, "MasksRLE", ex['id'], "0.json")
+            if exists(masks_path):
+                with open(masks_path, 'r') as f:
+                    metadata['masks'] = json.load(f)
+            else:
+                metadata['masks'] = {}
+
         return {
             'video': video_path,
             'multi_turn_messages': message_list,
@@ -2250,6 +2265,23 @@ class CFCCorrection(CFCMultiTurn):
         "all-rivers-val-v2":   "all-rivers-val-v2",
     }
 
+class CFCCorrectionA(CFCCorrection):
+    """Vision-corrections v2: complete simulated trajectories w/ vague user prompt, including correct videos."""
+    DATASET_NAME = "cfc_correction_a"
+    ID_TAG = "_complete_a"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-a.jsonl",
+        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-a.jsonl",
+    }
+
+class CFCCorrectionB(CFCCorrection):
+    """Vision-corrections v2: complete simulated trajectories w/ vague user prompt, not including correct videos."""
+    DATASET_NAME = "cfc_correction_b"
+    ID_TAG = "_complete_b"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-b.jsonl",
+        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-b.jsonl",
+    }
 
 class CFCCorrectionIncomplete(CFCCorrection):
     """Vision-corrections v2, incomplete-trajectory variant."""
@@ -2262,13 +2294,94 @@ class CFCCorrectionIncomplete(CFCCorrection):
 
 
 class CFCCorrectionReal(CFCCorrection):
-    """Vision-corrections v2, real-corrections variant (files pending)."""
+    """Vision-corrections v2, real-corrections variant."""
     DATASET_NAME = "cfc_correction_real"
     ID_TAG = "_real"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-real.jsonl",
-        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-real.jsonl",
+        "all-rivers-train-v2": "cfc_real_correction_c_train.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_c_val.jsonl",
     }
+
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """
+        For this real-corrections variant, GTs we want to eval against are different from the last correction step
+        of each trajectory in the JSONL. Instead we want to use the original COCO annotations for the video: just manually
+        hardlink the existing MasksRLE for the video beforehand. So this method only checks for the existence of the
+        corresponding MasksRLE and issues a warning if any are missing. 
+        """
+        split_to_file = getattr(cls, "SPLIT_TO_FILE", None)
+        if split_to_file:
+            jsonl_path = join(cls.VIDEO_HOME, "caption_annotations",
+                              split_to_file[data_split])
+        else:
+            jsonl_path = cls.CORRECTIONS_PATH
+        output_base = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_base, exist_ok=True)
+
+        records = []
+        with open(jsonl_path) as f:
+            for line in f:
+                records.append(json.loads(line))
+
+        n_missed = n_skipped = 0
+        for rec in tqdm(records, desc=f"{cls.DATASET_NAME} MasksRLE ({data_split})"):
+            video_id = rec['video_name']
+
+            for traj in rec['trajectories']:
+                example_id = f"{video_id}{cls.ID_TAG}_traj{traj['trajectory_id']}"
+                out_dir = join(output_base, example_id)
+                out_path = join(out_dir, "0.json")
+                if exists(out_path):
+                    n_skipped += 1
+                    continue
+                else:
+                    n_missed += 1
+                os.makedirs(out_dir, exist_ok=True)
+
+        log.info(f"[{cls.DATASET_NAME}] MasksRLE ({data_split}): "
+                 f"{n_missed} missing and need to be encoded, {n_skipped} existing skipped.")
+
+class CFCCorrectionRealB(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_b"
+    ID_TAG = "_real_b"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_b_train.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_b_val.jsonl",
+    }
+
+class CFCCorrectionRealA(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_a"
+    ID_TAG = "_real_a"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_a_train.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_a_val.jsonl",
+    }
+
+class CFCCorrectionRealAYoloSort(CFCCorrectionReal):
+    """real_a variant whose step-0 (pre-correction) tracks are real YOLO-SORT
+    tracker output and step-1 (post-correction) is the COCO GT. One trajectory
+    per video, fixed correction prompt "Fix any mistakes in these tracks."
+    Built by scripts/build_cfc_real_correction_a_yolosort.py. Distinct ID_TAG so
+    its hardlinked MasksRLE / example-ids don't collide with the curated real_a."""
+    DATASET_NAME = "cfc_correction_real_a_yolosort"
+    ID_TAG = "_real_a_ys"
+    SPLIT_TO_FILE = {
+        "all-rivers-val-v2": "cfc_real_correction_a_yolosort_val.jsonl",
+    }
+
+
+class CFCCorrectionKenaiChannel(CFCCorrectionReal):
+    """Real-correction variant for the held-out kenai-channel eval split. step-0
+    tracks are v1.1 tracker preds, step-1 is the COCO GT; correction prompt is
+    "track any missing fish in the video." One trajectory per video. Built by
+    scripts/build_cfc_correction_kenai_channel.py. GT masks are hardlinked from
+    the base MasksRLE (scripts/hardlink_real_correction_masks.py --variant kenai_channel)."""
+    DATASET_NAME = "cfc_correction_kenai_channel"
+    ID_TAG = "_kenai_channel"
+    SPLIT_MAP = {"channel": "kenai-channel"}
+    SPLIT_TO_FILE = {"kenai-channel": "cfc_correction_kenai_channel_val.jsonl"}
+    SPLIT_TO_FPS_SOURCE = {"kenai-channel": "kenai-channel"}
 
 
 class SAFARI(LocalTrackingDataset):
