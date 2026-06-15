@@ -149,6 +149,9 @@ def get_evaluator(name) -> EvaluatorConfig:
         ]
     ):
         return EvaluatorConfig(video_object_tracking_eval=name)
+    elif name.startswith("cfc_") and name.endswith("_eval_2fps"):
+        # All CFC 2fps eval tasks use the CFC tracking evaluator (adds nMAE + per-river metrics)
+        return EvaluatorConfig(cfc_track_eval=name)
     elif name.startswith("cfc_text"):
         return EvaluatorConfig(video_track_correction_eval=True)
     elif "correction" in name:
