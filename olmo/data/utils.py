@@ -136,7 +136,7 @@ def _download_file(url, filename):
             import gdown
         except ImportError:
             raise ImportError("Install gdown to download gdrive files")
-        gdown.download(url, filename, quiet=False, fuzzy=True)
+        gdown.download(url, filename, quiet=False)
         return
 
     # Send a GET request to the URL
