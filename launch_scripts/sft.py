@@ -183,9 +183,10 @@ INDIVIDUAL_DATASETS = {
     "cfc_text": "tracking",
     "cfc_correction": "tracking",
     "cfc_correction_incomplete": "tracking",
-    "cfc_correction_real_a": "tracking",
-    "cfc_correction_real_b": "tracking",
-    "cfc_correction_real_c": "tracking",
+    "cfc_correction_real_full": "tracking",
+    "cfc_correction_real_wrong_only": "tracking",
+    "cfc_correction_real_vague": "tracking",
+    "cfc_correction_real_no_info": "tracking",
     "cfc_correction_a": "tracking",
     "cfc_correction_b": "tracking",
 }
@@ -458,9 +459,10 @@ def get_training_mixture(name):
             # ["cfc_guided", ["cfc_guided"], 0.1],
             ["cfc_correction", ["cfc_correction"], 0.1],
             ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.1],
-            ["cfc_correction_real_c", ["cfc_correction_real_c"], 0.2],
-            ["cfc_correction_real_b", ["cfc_correction_real_b"], 0.2],
-            ["cfc_correction_real_a", ["cfc_correction_real_a"], 0.2]
+            ["cfc_correction_real_full", ["cfc_correction_real_full"], 0.2],
+            ["cfc_correction_real_wrong_only", ["cfc_correction_real_wrong_only"], 0.2],
+            ["cfc_correction_real_vague", ["cfc_correction_real_vague"], 0.2],
+            ["cfc_correction_real_no_info", ["cfc_correction_real_no_info"], 0.2]
         ]
     elif name in ["molmo_point", "molmo_point_long_context"]:
         pointing_high_res = 0.30
@@ -559,6 +561,8 @@ def main():
     parser.add_argument("--save_folder", type=str)
     parser.add_argument("--lora", action="store_true")
     parser.add_argument("--lora_rank", type=int, default=16)
+    parser.add_argument("--lora_vit", action="store_true")
+    parser.add_argument("--lora_connector", action="store_true")
     parser.add_argument("--ft_vit", action="store_true")
     parser.add_argument("--ft_llm", action="store_true")
     parser.add_argument("--ft_connector", action="store_true")
@@ -603,9 +607,10 @@ def main():
                                                                 # "cfc_correction_incomplete",
                                                                 # "cfc_correction_a",
                                                                 # "cfc_correction_b",
-                                                                "cfc_correction_real_a",
-                                                                "cfc_correction_real_b",
-                                                                # "cfc_correction_real_c",
+                                                                "cfc_correction_real_full",
+                                                                "cfc_correction_real_wrong_only",
+                                                                "cfc_correction_real_vague",
+                                                                "cfc_correction_real_no_info",
                                                                 ]]
         eval_tasks = []
     else:
@@ -638,6 +643,11 @@ def main():
 
     model_cfg.llm.lora = args.lora
     model_cfg.llm.lora_rank = args.lora_rank
+
+    if (args.lora_vit or args.lora_connector) and hasattr(model_cfg, "vision_backbone"):
+        model_cfg.vision_backbone.lora_vit = args.lora_vit
+        model_cfg.vision_backbone.lora_connector = args.lora_connector
+        model_cfg.vision_backbone.lora_rank = args.lora_rank
 
     num_workers = args.num_workers
     evaluations = []

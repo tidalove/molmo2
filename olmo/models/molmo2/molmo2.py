@@ -338,7 +338,9 @@ class Molmo2(ModelBase):
             raise NotImplementedError(wrap_strategy)
 
     def get_connector_parameters(self) -> Iterator[torch.Tensor]:
-        parameters = list(self.vision_backbone.get_connector_parameters())
+        lora_params = set(self.get_lora_parameters())
+        parameters = [p for p in self.vision_backbone.get_connector_parameters()
+                      if p not in lora_params]
         if self.config.llm.additional_vocab_size:
             parameters.append(self.transformer.wte.new_embedding)
         return parameters
@@ -347,7 +349,9 @@ class Molmo2(ModelBase):
         if self.vision_backbone is None:
             return []
         else:
-            return self.vision_backbone.image_vit.parameters()
+            lora_params = set(self.get_lora_parameters())
+            return (p for p in self.vision_backbone.image_vit.parameters()
+                    if p not in lora_params)
 
     def get_llm_parameters(self) -> Iterator[torch.Tensor]:
         lora_params = set(self.get_lora_parameters())
@@ -364,8 +368,9 @@ class Molmo2(ModelBase):
             )
         
     def get_lora_parameters(self) -> Iterator[torch.Tensor]:
+        # Covers LoRA in the LLM (transformer) as well as the ViT/connector (vision_backbone)
         from olmo.nn.llm import LoRALinear
-        for module in self.transformer.modules():
+        for module in self.modules():
             if isinstance(module, LoRALinear):
                 yield module.A
                 yield module.B
