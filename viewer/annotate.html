@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Track Correction Annotator</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a1a; color: #e0e0e0; }
+
+.app { display: flex; height: 100vh; overflow: hidden; }
+button { padding: 6px 12px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; cursor: pointer; font-size: 13px; }
+button:hover:not(:disabled) { background: #444; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.primary { background: #1e40af; border-color: #3b82f6; }
+button.primary:hover:not(:disabled) { background: #2563eb; }
+button.danger { background: #7f1d1d; border-color: #b91c1c; }
+button.danger:hover:not(:disabled) { background: #991b1b; }
+button.mode.active { background: #1e3a5f; border-color: #3b82f6; color: #fff; }
+input[type=text], textarea { padding: 6px 8px; background: #111; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 13px; font-family: inherit; }
+input[type=text]:focus, textarea:focus { outline: none; border-color: #3b82f6; }
+
+/* ---------- sidebar ---------- */
+.sidebar { width: 340px; min-width: 340px; background: #222; border-right: 1px solid #333; display: flex; flex-direction: column; }
+.sidebar-header { padding: 10px 12px; border-bottom: 1px solid #333; display: flex; flex-direction: column; gap: 8px; }
+.sidebar-header h2 { font-size: 15px; font-weight: 600; }
+.pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #333; color: #aaa; }
+.pill.ready { background: #14532d; color: #4ade80; }
+.pill.loading { background: #713f12; color: #fbbf24; }
+.pill.error { background: #7f1d1d; color: #fca5a5; }
+.header-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+
+.video-list { max-height: 30%; overflow-y: auto; border-bottom: 1px solid #333; padding: 4px; flex-shrink: 0; }
+.vid-item { padding: 5px 8px; cursor: pointer; font-size: 12px; border-radius: 3px; margin: 1px 0; word-break: break-all; display: flex; gap: 6px; align-items: baseline; }
+.vid-item:hover { background: #2a2a2a; }
+.vid-item.active { background: #1e3a5f; color: #fff; }
+.vid-item .n { color: #888; font-size: 11px; flex-shrink: 0; }
+
+.tree-header { padding: 8px 12px 4px; font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+.tree-wrap { flex: 1; overflow: auto; padding: 6px 10px 20px; }
+.tree-children { margin-left: 14px; border-left: 1px solid #444; padding-left: 10px; }
+.tree-node { position: relative; margin: 6px 0; }
+.tree-box { position: relative; background: #2a2a2a; border: 1px solid #444; border-radius: 5px; padding: 6px 8px; cursor: pointer; font-size: 12px; line-height: 1.35; }
+.tree-box:hover { background: #313131; }
+.tree-box.selected { background: #1e3a5f; border-color: #3b82f6; }
+.tree-box.ghost { opacity: 0.55; font-style: italic; border-style: dashed; }
+.tree-box .badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 3px; margin-right: 6px; text-transform: uppercase; }
+.badge.root   { background: #14532d; color: #86efac; }
+.badge.model  { background: #1e3a8a; color: #93c5fd; }
+.badge.loaded { background: #3b2f14; color: #fbbf24; }
+.badge.manual { background: #4c1d95; color: #d8b4fe; }
+.tree-box .meta { color: #888; font-size: 11px; margin-top: 2px; }
+.tree-box .x { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; line-height: 16px; text-align: center; border-radius: 50%; background: #7f1d1d; color: #fff; font-size: 12px; display: none; cursor: pointer; border: 1px solid #b91c1c; }
+.tree-box:hover .x { display: block; }
+.tree-arrow { color: #555; font-size: 11px; margin-left: 4px; }
+
+/* ---------- main ---------- */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* setup panel */
+.setup { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; max-width: 900px; }
+.setup h2 { font-size: 17px; }
+.setup .card { background: #222; border: 1px solid #333; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.setup .card h3 { font-size: 13px; color: #9ec1f1; text-transform: uppercase; letter-spacing: 0.5px; }
+.setup .hint { font-size: 11px; color: #777; }
+.pick-list { max-height: 220px; overflow-y: auto; border: 1px solid #333; border-radius: 4px; background: #191919; padding: 4px; }
+.pick-item { display: flex; gap: 8px; padding: 3px 6px; font-size: 12px; cursor: pointer; border-radius: 3px; align-items: center; }
+.pick-item:hover { background: #262626; }
+.fs-row { display: flex; gap: 6px; }
+.fs-row input { flex: 1; }
+.fs-list { max-height: 160px; overflow-y: auto; border: 1px solid #333; border-radius: 4px; background: #191919; padding: 4px; font-size: 12px; }
+.fs-entry { padding: 3px 6px; cursor: pointer; border-radius: 3px; }
+.fs-entry:hover { background: #262626; }
+.fs-entry.dir { color: #93c5fd; }
+.inspect-result { font-size: 12px; color: #aaa; }
+.load-results { font-size: 12px; }
+.load-results .ok { color: #4ade80; }
+.load-results .err { color: #fca5a5; }
+
+/* viewer */
+.viewer { flex: 1; display: none; flex-direction: column; overflow: hidden; padding: 10px 12px; gap: 8px; }
+.topbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: #aaa; }
+.topbar .vid { font-family: ui-monospace, monospace; color: #ddd; }
+.frame-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 4px; overflow: hidden; position: relative; min-height: 120px; }
+#canvas { max-width: 100%; max-height: 100%; }
+#canvas.editing { cursor: crosshair; }
+.frame-info { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; }
+.edit-banner { position: absolute; top: 8px; right: 8px; background: rgba(90,30,150,0.85); padding: 4px 10px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; display: none; }
+.controls { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.controls input[type=range] { flex: 1; }
+.controls label.toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa; cursor: pointer; white-space: nowrap; }
+
+/* track chips */
+.chips { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+.chip { padding: 2px 9px; border-radius: 10px; border: 1px solid #555; cursor: pointer; user-select: none; }
+.chip.active { border-width: 2px; font-weight: 700; }
+.chip.hidden-track { opacity: 0.35; text-decoration: line-through; }
+
+/* bottom panels */
+.bottom { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toolbar .sep { width: 1px; height: 22px; background: #444; }
+.toolbar .counts { font-size: 12px; color: #aaa; }
+.prompt-row { display: flex; gap: 8px; align-items: flex-start; }
+.prompt-row textarea { flex: 1; min-height: 44px; resize: vertical; }
+.job-status { font-size: 12px; color: #fbbf24; }
+.job-status.err { color: #fca5a5; white-space: pre-wrap; }
+.toast { position: fixed; bottom: 16px; right: 16px; background: #14532d; color: #d1fae5; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; z-index: 50; max-width: 480px; word-break: break-all; }
+details.raw { font-size: 11px; color: #888; }
+details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140px; overflow-y: auto; background: #111; padding: 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="header-row">
+        <h2>Track Annotator</h2>
+        <span class="pill" id="model-pill">model: …</span>
+      </div>
+      <div class="header-row">
+        <button id="btn-open-setup">＋ Load videos</button>
+        <span class="pill" id="session-count"></span>
+      </div>
+    </div>
+    <div class="video-list" id="video-list"></div>
+    <div class="tree-header">Trajectory tree <span id="tree-video"></span></div>
+    <div class="tree-wrap" id="tree"></div>
+  </aside>
+
+  <main class="main">
+    <!-- ============ setup panel ============ -->
+    <div class="setup" id="setup">
+      <h2>Load videos + initial predictions</h2>
+      <div class="card">
+        <h3>1 · Videos</h3>
+        <input type="text" id="vid-filter" placeholder="Filter videos (e.g. ARIS)…">
+        <div class="pick-list" id="vid-pick"></div>
+        <div class="hint" id="vid-pick-hint"></div>
+        <input type="text" id="vid-exact" placeholder="…or exact video names / paths, comma-separated">
+        <div class="hint">Selected: <span id="vid-selected">none</span></div>
+      </div>
+      <div class="card">
+        <h3>2 · Initial predictions source</h3>
+        <div class="fs-row">
+          <input type="text" id="src-path" placeholder="Path to predictions.json / COCO json / trajectory jsonl">
+          <button id="btn-browse">Browse</button>
+          <button id="btn-inspect">Inspect</button>
+        </div>
+        <div class="fs-list" id="fs-list" style="display:none"></div>
+        <div class="inspect-result" id="inspect-result"></div>
+        <div id="traj-pick" style="display:none">
+          <label style="font-size:12px">Trajectory: <select id="traj-select"></select></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>3 · Confirm</h3>
+        <div class="hint">Frames and metadata are only read after you confirm. Existing sessions for the
+          same videos are resumed (tick the box to reinitialize from the source instead).</div>
+        <label class="toggle" style="font-size:12px"><input type="checkbox" id="force-reinit"> Reinitialize (discard existing session trees for these videos)</label>
+        <div><button class="primary" id="btn-load">Confirm &amp; Load</button></div>
+        <div class="load-results" id="load-results"></div>
+      </div>
+    </div>
+
+    <!-- ============ viewer ============ -->
+    <section class="viewer" id="viewer">
+      <div class="topbar">
+        <span class="vid" id="tb-video"></span>
+        <span id="tb-meta"></span>
+        <span style="flex:1"></span>
+        <button id="btn-export">Export path → jsonl</button>
+      </div>
+      <div class="frame-wrap">
+        <canvas id="canvas"></canvas>
+        <div class="frame-info" id="frame-info"></div>
+        <div class="edit-banner" id="edit-banner"></div>
+      </div>
+      <div class="controls">
+        <button id="prev">&laquo;</button>
+        <input id="slider" type="range" min="0" max="0" value="0">
+        <button id="next">&raquo;</button>
+        <label class="toggle"><input type="checkbox" id="only-point-frames"> Only frames with points</label>
+        <label class="toggle"><input type="checkbox" id="show-trails" checked> Trails</label>
+      </div>
+      <div class="bottom">
+        <div class="chips" id="chips"></div>
+        <div class="toolbar" id="toolbar">
+          <button id="btn-edit">✏️ Edit points</button>
+          <span id="edit-tools" style="display:none">
+            <button class="mode" id="mode-add">Add</button>
+            <button class="mode" id="mode-move">Move</button>
+            <button class="mode" id="mode-del">Delete</button>
+            <button id="btn-new-track">＋ New track</button>
+            <span class="sep"></span>
+            <span class="counts" id="edit-counts"></span>
+            <button class="primary" id="btn-save-edit">Save as new step</button>
+            <button id="btn-cancel-edit">Cancel</button>
+          </span>
+        </div>
+        <div class="prompt-row">
+          <textarea id="prompt-text" placeholder="Correction prompt for the model — runs off the SELECTED tree node (e.g. 'the track near the top at 3s is a false positive, remove it')"></textarea>
+          <button class="primary" id="btn-run" disabled>Run model</button>
+        </div>
+        <div class="job-status" id="job-status"></div>
+        <details class="raw" id="raw-details" style="display:none"><summary>raw model output</summary><pre id="raw-pre"></pre></details>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+/* ================= state ================= */
+const state = {
+  config: null,
+  sessions: [],        // /api/videos summaries
+  video: null,         // current video id
+  session: null,       // full session dict (+available_frames)
+  frameList: [],
+  cursor: 0,
+  hidden: new Set(),   // hidden track ids (display only)
+  activeTrack: null,   // chip-selected track id (edit target)
+  edit: null,          // {parentId, base, tracks, mode, drag}
+  job: null,           // {id, parentId, prompt, video}
+  imgCache: new Map(),
+};
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  modelPill: $("model-pill"), sessionCount: $("session-count"),
+  videoList: $("video-list"), tree: $("tree"), treeVideo: $("tree-video"),
+  setup: $("setup"), viewer: $("viewer"),
+  vidFilter: $("vid-filter"), vidPick: $("vid-pick"), vidPickHint: $("vid-pick-hint"),
+  vidExact: $("vid-exact"), vidSelected: $("vid-selected"),
+  srcPath: $("src-path"), fsList: $("fs-list"), inspectResult: $("inspect-result"),
+  trajPick: $("traj-pick"), trajSelect: $("traj-select"),
+  forceReinit: $("force-reinit"), loadResults: $("load-results"),
+  tbVideo: $("tb-video"), tbMeta: $("tb-meta"),
+  canvas: $("canvas"), frameInfo: $("frame-info"), editBanner: $("edit-banner"),
+  prev: $("prev"), next: $("next"), slider: $("slider"),
+  onlyPointFrames: $("only-point-frames"), showTrails: $("show-trails"),
+  chips: $("chips"), editTools: $("edit-tools"), editCounts: $("edit-counts"),
+  promptText: $("prompt-text"), btnRun: $("btn-run"),
+  jobStatus: $("job-status"), rawDetails: $("raw-details"), rawPre: $("raw-pre"),
+  toast: $("toast"),
+};
+const ctx = els.canvas.getContext("2d");
+const setupPick = new Set();  // videos ticked in the setup panel
+
+/* ================= utils ================= */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function trackColor(id) {
+  let idx = parseInt(id, 10);
+  if (Number.isNaN(idx)) { let h = 0; for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) | 0; idx = Math.abs(h); }
+  const hue = (idx * 0.6180339887) % 1.0;
+  const i = Math.floor(hue * 6), f = hue * 6 - i, v = 1.0, s = 0.85;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const rgb = [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i % 6];
+  return `rgb(${Math.round(rgb[0]*255)}, ${Math.round(rgb[1]*255)}, ${Math.round(rgb[2]*255)})`;
+}
+function toast(msg, ms = 4000) {
+  els.toast.textContent = msg;
+  els.toast.style.display = "block";
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => els.toast.style.display = "none", ms);
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let msg = `${r.status}`;
+    try { msg = (await r.json()).detail || msg; } catch (e) { /* ignore */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+function post(path, body) {
+  return api(path, { method: "POST", headers: {"Content-Type": "application/json"},
+                     body: JSON.stringify(body) });
+}
+
+/* ================= init / polling ================= */
+async function init() {
+  state.config = await api("/api/config");
+  await refreshSessions();
+  bindSetup();
+  bindViewer();
+  pollModel();
+  if (state.sessions.length === 0) showSetup();
+  else { showSetup(); }   // start on setup either way; sidebar lists resumable sessions
+}
+
+async function refreshSessions() {
+  state.sessions = await api("/api/videos");
+  els.sessionCount.textContent = `${state.sessions.length} session${state.sessions.length === 1 ? "" : "s"}`;
+  renderVideoList();
+}
+
+async function pollModel() {
+  try {
+    const s = await api("/api/model/status");
+    const pill = els.modelPill;
+    pill.className = "pill";
+    if (s.state === "ready") { pill.classList.add("ready"); pill.textContent = "model: ready"; }
+    else if (s.state === "loading") { pill.classList.add("loading"); pill.textContent = "model: loading…"; }
+    else if (s.state === "error") { pill.classList.add("error"); pill.textContent = "model: error"; pill.title = s.error || ""; }
+    else pill.textContent = `model: ${s.state}`;
+    els.btnRun.disabled = s.state !== "ready" || !!state.job || !state.session;
+    if (s.state === "ready" || s.state === "disabled") setTimeout(pollModel, 15000);
+    else setTimeout(pollModel, 3000);
+  } catch (e) { setTimeout(pollModel, 5000); }
+}
+
+/* ================= setup panel ================= */
+function showSetup() { els.setup.style.display = "flex"; els.viewer.style.display = "none"; }
+function showViewer() { els.setup.style.display = "none"; els.viewer.style.display = "flex"; }
+
+function bindSetup() {
+  $("btn-open-setup").onclick = () => { showSetup(); refreshBrowse(); };
+  els.vidFilter.addEventListener("input", debounce(refreshBrowse, 250));
+  $("btn-browse").onclick = () => browseFs(els.srcPath.value || state.config.data_dir);
+  $("btn-inspect").onclick = inspectSource;
+  $("btn-load").onclick = confirmLoad;
+  refreshBrowse();
+}
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+async function refreshBrowse() {
+  try {
+    const q = els.vidFilter.value.trim();
+    const r = await api(`/api/browse/videos?q=${encodeURIComponent(q)}&limit=300`);
+    els.vidPick.innerHTML = "";
+    if (!r.listing_ok) {
+      els.vidPickHint.textContent = "Video directory not listable — paste exact names below.";
+      return;
+    }
+    for (const v of r.videos) {
+      const it = document.createElement("label");
+      it.className = "pick-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = setupPick.has(v);
+      cb.onchange = () => { cb.checked ? setupPick.add(v) : setupPick.delete(v); renderPicked(); };
+      it.appendChild(cb);
+      it.appendChild(document.createTextNode(" " + v));
+      els.vidPick.appendChild(it);
+    }
+    els.vidPickHint.textContent = r.truncated ? `showing first ${r.videos.length} — narrow the filter` : `${r.videos.length} match(es)`;
+  } catch (e) {
+    els.vidPickHint.textContent = `listing failed (${e.message}) — paste exact names below.`;
+  }
+}
+function renderPicked() {
+  els.vidSelected.textContent = setupPick.size ? [...setupPick].join(", ") : "none";
+}
+
+async function browseFs(path) {
+  try {
+    const r = await api(`/api/browse/fs?path=${encodeURIComponent(path)}`);
+    if (r.is_file) { els.srcPath.value = r.path; els.fsList.style.display = "none"; return; }
+    if (r.error) { toast(`browse: ${r.error}`); return; }
+    els.fsList.style.display = "block";
+    els.fsList.innerHTML = "";
+    const up = document.createElement("div");
+    up.className = "fs-entry dir";
+    up.textContent = "⬆ ..";
+    up.onclick = () => browseFs(r.parent);
+    els.fsList.appendChild(up);
+    for (const d of r.dirs) {
+      const e = document.createElement("div");
+      e.className = "fs-entry dir"; e.textContent = "📁 " + d;
+      e.onclick = () => browseFs(r.path + "/" + d);
+      els.fsList.appendChild(e);
+    }
+    for (const f of r.files) {
+      const e = document.createElement("div");
+      e.className = "fs-entry"; e.textContent = "📄 " + f;
+      e.onclick = () => { els.srcPath.value = r.path + "/" + f; els.fsList.style.display = "none"; inspectSource(); };
+      els.fsList.appendChild(e);
+    }
+  } catch (e) { toast(`browse failed: ${e.message}`); }
+}
+
+async function inspectSource() {
+  const path = els.srcPath.value.trim();
+  if (!path) return;
+  els.inspectResult.textContent = "inspecting…";
+  els.trajPick.style.display = "none";
+  try {
+    const r = await post("/api/inspect_source", { path });
+    if (r.error) { els.inspectResult.innerHTML = `<span style="color:#fca5a5">✗ ${escapeHtml(r.error)}</span>`; return; }
+    els.inspectResult.textContent = `✓ ${r.kind} — ${r.videos.length} video(s)`;
+    // trajectory dropdown only when some video has >1 trajectory
+    const byVideo = {};
+    for (const t of (r.trajectories || [])) (byVideo[t.video] = byVideo[t.video] || []).push(t);
+    const multi = Object.values(byVideo).some(l => l.length > 1);
+    if (multi) {
+      els.trajSelect.innerHTML = "";
+      const ids = [...new Set((r.trajectories || []).map(t => t.trajectory_id))].sort((a, b) => a - b);
+      for (const tid of ids) {
+        const o = document.createElement("option");
+        o.value = tid; o.textContent = `trajectory ${tid}`;
+        els.trajSelect.appendChild(o);
+      }
+      els.trajPick.style.display = "block";
+    }
+  } catch (e) { els.inspectResult.innerHTML = `<span style="color:#fca5a5">✗ ${escapeHtml(e.message)}</span>`; }
+}
+
+async function confirmLoad() {
+  const videos = [...setupPick];
+  for (const v of els.vidExact.value.split(",").map(s => s.trim()).filter(Boolean)) videos.push(v);
+  if (!videos.length) { toast("pick at least one video"); return; }
+  const source_path = els.srcPath.value.trim();
+  if (!source_path) { toast("pick a predictions source file"); return; }
+  const body = { videos, source_path, force_reinit: els.forceReinit.checked };
+  if (els.trajPick.style.display !== "none") body.trajectory_id = parseInt(els.trajSelect.value, 10);
+  els.loadResults.textContent = "loading… (first touch of frames/metadata)";
+  try {
+    const r = await post("/api/load", body);
+    els.loadResults.innerHTML = r.sessions.map(s =>
+      s.ok ? `<div class="ok">✓ ${escapeHtml(s.video)} — ${s.n_nodes} node(s)${s.resumed ? " (resumed)" : ""}</div>`
+           : `<div class="err">✗ ${escapeHtml(s.video)} — ${escapeHtml(s.error)}</div>`).join("");
+    await refreshSessions();
+    const first = r.sessions.find(s => s.ok);
+    if (first) await openVideo(first.video);
+  } catch (e) { els.loadResults.innerHTML = `<div class="err">✗ ${escapeHtml(e.message)}</div>`; }
+}
+
+/* ================= sidebar: videos + tree ================= */
+function renderVideoList() {
+  els.videoList.innerHTML = "";
+  for (const v of state.sessions) {
+    const it = document.createElement("div");
+    it.className = "vid-item" + (v.video === state.video ? " active" : "");
+    it.innerHTML = `<span class="name">${escapeHtml(v.video)}</span><span class="n">${v.n_nodes}⛁</span>`;
+    it.onclick = () => openVideo(v.video);
+    els.videoList.appendChild(it);
+  }
+}
+
+async function openVideo(video) {
+  if (state.edit && !confirm("Discard unsaved point edits?")) return;
+  cancelEdit(true);
+  state.video = video;
+  state.session = await api(`/api/session/${encodeURIComponent(video)}`);
+  state.hidden = new Set();
+  state.activeTrack = null;
+  renderVideoList();
+  renderAll();
+  showViewer();
+}
+
+function selectedNode() {
+  return state.session ? state.session.nodes[state.session.selected_node_id] : null;
+}
+function displayTracks() {
+  if (state.edit) return state.edit.tracks;
+  const n = selectedNode();
+  return n ? n.tracks : {};
+}
+
+function renderAll() {
+  renderTopbar();
+  renderTree();
+  renderChips();
+  updateFrameList(true);
+}
+
+function renderTopbar() {
+  const s = state.session;
+  els.tbVideo.textContent = s.video;
+  const n = selectedNode();
+  const npts = n ? Object.values(n.tracks).reduce((a, t) => a + Object.keys(t).length, 0) : 0;
+  els.tbMeta.textContent = `${s.width}×${s.height} · fps=${s.video_fps} · node ${s.selected_node_id} (${n ? n.kind : "?"}): ${Object.keys(n ? n.tracks : {}).length} tracks / ${npts} pts`;
+  els.treeVideo.textContent = "— " + s.video;
+}
+
+function renderTree() {
+  const s = state.session;
+  els.tree.innerHTML = "";
+  if (!s) return;
+  const children = {};
+  let root = null;
+  for (const [nid, n] of Object.entries(s.nodes)) {
+    if (n.parent_id === null) root = nid;
+    else (children[n.parent_id] = children[n.parent_id] || []).push(nid);
+  }
+  for (const l of Object.values(children)) l.sort((a, b) => parseInt(a) - parseInt(b));
+
+  const build = (nid) => {
+    const n = s.nodes[nid];
+    const wrap = document.createElement("div");
+    wrap.className = "tree-node";
+    const box = document.createElement("div");
+    box.className = "tree-box" + (nid === s.selected_node_id ? " selected" : "");
+    const npts = Object.values(n.tracks).reduce((a, t) => a + Object.keys(t).length, 0);
+    box.innerHTML =
+      `<span class="badge ${n.kind}">${n.kind}</span>` +
+      `${escapeHtml(n.prompt.length > 60 ? n.prompt.slice(0, 57) + "…" : n.prompt)}` +
+      `<div class="meta">#${nid} · ${Object.keys(n.tracks).length} tracks · ${npts} pts</div>`;
+    box.title = n.prompt + (n.created_at ? `\n(${n.created_at})` : "");
+    box.onclick = () => selectNode(nid);
+    if (n.parent_id !== null) {
+      const x = document.createElement("div");
+      x.className = "x"; x.textContent = "✕";
+      x.title = "Delete this step and everything after it";
+      x.onclick = (e) => { e.stopPropagation(); deleteNode(nid); };
+      box.appendChild(x);
+    }
+    wrap.appendChild(box);
+    const kids = children[nid] || [];
+    const ghosts = (state.job && state.job.video === s.video && state.job.parentId === nid) ? [state.job] : [];
+    if (kids.length || ghosts.length) {
+      const cw = document.createElement("div");
+      cw.className = "tree-children";
+      for (const k of kids) cw.appendChild(build(k));
+      for (const g of ghosts) {
+        const gn = document.createElement("div");
+        gn.className = "tree-node";
+        gn.innerHTML = `<div class="tree-box ghost"><span class="badge model">model</span>⏳ ${escapeHtml(g.prompt.slice(0, 50))}</div>`;
+        cw.appendChild(gn);
+      }
+      wrap.appendChild(cw);
+    }
+    return wrap;
+  };
+  if (root !== null) els.tree.appendChild(build(root));
+}
+
+async function selectNode(nid) {
+  if (state.edit && !confirm("Discard unsaved point edits?")) return;
+  cancelEdit(true);
+  if (nid === state.session.selected_node_id) { renderAll(); return; }
+  try {
+    await post(`/api/session/${encodeURIComponent(state.video)}/select`, { node_id: nid });
+    state.session.selected_node_id = nid;
+    renderAll();
+  } catch (e) { toast(`select failed: ${e.message}`); }
+}
+
+async function deleteNode(nid) {
+  const n = state.session.nodes[nid];
+  if (!confirm(`Delete step #${nid} ("${n.prompt.slice(0, 60)}") and ALL steps after it?`)) return;
+  try {
+    const r = await api(`/api/session/${encodeURIComponent(state.video)}/node/${nid}`, { method: "DELETE" });
+    for (const d of r.deleted_ids) delete state.session.nodes[d];
+    state.session.selected_node_id = r.selected_node_id;
+    await refreshSessions();
+    renderAll();
+  } catch (e) { toast(`delete failed: ${e.message}`); }
+}
+
+/* ================= frames + canvas ================= */
+function framesWithPoints(tracks) {
+  const set = new Set();
+  for (const t of Object.values(tracks)) for (const f of Object.keys(t)) set.add(parseInt(f, 10));
+  return [...set].sort((a, b) => a - b);
+}
+
+function updateFrameList(resetCursor) {
+  const s = state.session;
+  if (!s) return;
+  const avail = s.available_frames || [];
+  if (els.onlyPointFrames.checked) {
+    const onDisk = new Set(avail);
+    state.frameList = framesWithPoints(displayTracks()).filter(f => onDisk.has(f));
+    if (!state.frameList.length) state.frameList = avail.slice();
+  } else {
+    state.frameList = avail.slice();
+  }
+  if (resetCursor || state.cursor >= state.frameList.length) state.cursor = 0;
+  els.slider.min = 0;
+  els.slider.max = Math.max(0, state.frameList.length - 1);
+  els.slider.value = state.cursor;
+  drawFrame();
+}
+
+function currentFrame() { return state.frameList.length ? state.frameList[state.cursor] : null; }
+
+function loadImage(video, frame) {
+  const key = `${video}/${frame}`;
+  if (state.imgCache.has(key)) return Promise.resolve(state.imgCache.get(key));
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      if (state.imgCache.size > 300) state.imgCache.clear();
+      state.imgCache.set(key, img); resolve(img);
+    };
+    img.onerror = reject;
+    img.src = `/api/frame/${encodeURIComponent(video)}/${frame}`;
+  });
+}
+
+async function drawFrame() {
+  const s = state.session;
+  const frame = currentFrame();
+  if (!s || frame === null) return;
+  let img = null;
+  try { img = await loadImage(s.video, frame); } catch (e) { /* draw without */ }
+  if (currentFrame() !== frame) return;  // user moved on while loading
+  els.canvas.width = s.width;
+  els.canvas.height = s.height;
+  if (img) ctx.drawImage(img, 0, 0, s.width, s.height);
+  else { ctx.fillStyle = "#300"; ctx.fillRect(0, 0, s.width, s.height); }
+
+  const scale = els.canvas.clientWidth > 0 ? s.width / els.canvas.clientWidth : 1;
+  const tracks = displayTracks();
+  const fstr = String(frame);
+  let shown = 0;
+
+  for (const [tid, tmap] of Object.entries(tracks)) {
+    if (state.hidden.has(tid)) continue;
+    const color = trackColor(tid);
+    if (els.showTrails.checked) drawTrail(tmap, frame, color, scale);
+    const pt = tmap[fstr];
+    if (!pt) continue;
+    shown++;
+    const r = 6 * scale;
+    ctx.beginPath();
+    ctx.arc(pt[0], pt[1], r, 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.lineWidth = 1.5 * scale; ctx.strokeStyle = "#000"; ctx.stroke();
+    if (state.edit && tid === state.activeTrack) {
+      ctx.beginPath(); ctx.arc(pt[0], pt[1], r + 4 * scale, 0, Math.PI * 2);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2 * scale; ctx.stroke();
+    }
+    const fontPx = 14 * scale;
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    const label = tid;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(pt[0] + r + 2 * scale, pt[1] - fontPx / 2 - 2 * scale, tw + 6 * scale, fontPx + 4 * scale);
+    ctx.fillStyle = color;
+    ctx.fillText(label, pt[0] + r + 5 * scale, pt[1] + fontPx / 2 - 2 * scale);
+  }
+  const t = (frame / s.video_fps).toFixed(1);
+  els.frameInfo.textContent =
+    `frame ${frame} (${t}s) · ${shown} point${shown === 1 ? "" : "s"} · [${state.cursor + 1}/${state.frameList.length}]`
+    + (state.edit ? " · EDITING" : "");
+}
+
+function drawTrail(tmap, frame, color, scale) {
+  const pts = [];
+  for (let f = frame - 3; f <= frame + 3; f++) {
+    const p = tmap[String(f)];
+    if (p) pts.push(p);
+  }
+  if (pts.length < 2) return;
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2 * scale;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (const p of pts.slice(1)) ctx.lineTo(p[0], p[1]);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ================= track chips ================= */
+function renderChips() {
+  els.chips.innerHTML = "";
+  const tracks = displayTracks();
+  const ids = Object.keys(tracks).sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
+  if (!ids.length) { els.chips.innerHTML = '<span style="color:#666;font-size:12px">no tracks</span>'; return; }
+  for (const tid of ids) {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (tid === state.activeTrack ? " active" : "") + (state.hidden.has(tid) ? " hidden-track" : "");
+    chip.style.borderColor = trackColor(tid);
+    chip.style.color = trackColor(tid);
+    chip.textContent = `${tid} (${Object.keys(tracks[tid]).length})`;
+    chip.title = "click: set active · double-click: toggle visibility";
+    chip.onclick = () => { state.activeTrack = tid; renderChips(); drawFrame(); };
+    chip.ondblclick = () => {
+      state.hidden.has(tid) ? state.hidden.delete(tid) : state.hidden.add(tid);
+      renderChips(); drawFrame();
+    };
+    els.chips.appendChild(chip);
+  }
+}
+
+/* ================= manual edit mode ================= */
+function bindViewer() {
+  els.prev.onclick = () => moveCursor(-1);
+  els.next.onclick = () => moveCursor(1);
+  els.slider.oninput = (e) => { state.cursor = parseInt(e.target.value, 10); drawFrame(); };
+  els.onlyPointFrames.onchange = () => updateFrameList(true);
+  els.showTrails.onchange = () => drawFrame();
+  $("btn-edit").onclick = startEdit;
+  $("mode-add").onclick = () => setMode("add");
+  $("mode-move").onclick = () => setMode("move");
+  $("mode-del").onclick = () => setMode("del");
+  $("btn-new-track").onclick = newTrack;
+  $("btn-save-edit").onclick = saveEdit;
+  $("btn-cancel-edit").onclick = () => cancelEdit(false);
+  $("btn-run").onclick = runModel;
+  $("btn-export").onclick = doExport;
+  els.canvas.addEventListener("mousedown", canvasDown);
+  els.canvas.addEventListener("mousemove", canvasMove);
+  window.addEventListener("mouseup", canvasUp);
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+    if (e.key === "ArrowLeft") moveCursor(-1);
+    else if (e.key === "ArrowRight") moveCursor(1);
+    else if (e.key === "a" && state.edit) setMode("add");
+    else if (e.key === "m" && state.edit) setMode("move");
+    else if (e.key === "d" && state.edit) setMode("del");
+  });
+  let rt = null;
+  window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawFrame, 80); });
+}
+
+function moveCursor(d) {
+  if (!state.frameList.length) return;
+  state.cursor = Math.max(0, Math.min(state.frameList.length - 1, state.cursor + d));
+  els.slider.value = state.cursor;
+  drawFrame();
+}
+
+function startEdit() {
+  const n = selectedNode();
+  if (!n) return;
+  state.edit = {
+    parentId: n.id,
+    base: JSON.parse(JSON.stringify(n.tracks)),
+    tracks: JSON.parse(JSON.stringify(n.tracks)),
+    mode: "add",
+    drag: null,
+  };
+  const ids = Object.keys(state.edit.tracks);
+  if (!state.activeTrack || !ids.includes(state.activeTrack)) state.activeTrack = ids[0] || null;
+  $("btn-edit").style.display = "none";
+  els.editTools.style.display = "inline-flex";
+  els.editTools.style.gap = "8px";
+  els.editTools.style.alignItems = "center";
+  els.canvas.classList.add("editing");
+  els.editBanner.style.display = "block";
+  setMode("add");
+  updateCounts();
+  renderChips();
+  drawFrame();
+}
+
+function setMode(m) {
+  if (!state.edit) return;
+  state.edit.mode = m;
+  for (const [id, mm] of [["mode-add", "add"], ["mode-move", "move"], ["mode-del", "del"]])
+    $(id).classList.toggle("active", mm === m);
+  els.editBanner.textContent =
+    m === "add" ? `ADD → track ${state.activeTrack ?? "?"} @ current frame`
+    : m === "move" ? "MOVE → drag a point"
+    : "DELETE → click a point";
+}
+
+function newTrack() {
+  if (!state.edit) return;
+  let maxId = state.session.next_track_id - 1;
+  for (const tid of Object.keys(state.edit.tracks)) {
+    const v = parseInt(tid, 10);
+    if (!Number.isNaN(v) && v > maxId) maxId = v;
+  }
+  const tid = String(maxId + 1);
+  state.edit.tracks[tid] = {};
+  state.activeTrack = tid;
+  setMode("add");
+  renderChips();
+  toast(`new track ${tid} — click the canvas to place its points`, 2500);
+}
+
+function canvasXY(e) {
+  const rect = els.canvas.getBoundingClientRect();
+  const sx = els.canvas.width / rect.width;
+  const sy = els.canvas.height / rect.height;
+  return [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
+}
+
+function hitTest(x, y) {
+  // nearest visible point at the current frame within threshold
+  const frame = String(currentFrame());
+  const thr = 12 * (els.canvas.width / els.canvas.clientWidth);
+  let best = null, bestD = thr;
+  for (const [tid, tmap] of Object.entries(state.edit.tracks)) {
+    if (state.hidden.has(tid)) continue;
+    const p = tmap[frame];
+    if (!p) continue;
+    const d = Math.hypot(p[0] - x, p[1] - y);
+    if (d <= bestD) { bestD = d; best = tid; }
+  }
+  return best;
+}
+
+function canvasDown(e) {
+  if (!state.edit) return;
+  const [x, y] = canvasXY(e);
+  const frame = String(currentFrame());
+  const m = state.edit.mode;
+  if (m === "add") {
+    if (!state.activeTrack) { toast("pick or create a track first"); return; }
+    (state.edit.tracks[state.activeTrack] = state.edit.tracks[state.activeTrack] || {})[frame] = [x, y];
+    updateCounts(); renderChips(); drawFrame();
+  } else if (m === "del") {
+    const tid = hitTest(x, y);
+    if (tid) {
+      delete state.edit.tracks[tid][frame];
+      if (!Object.keys(state.edit.tracks[tid]).length) {
+        delete state.edit.tracks[tid];
+        if (state.activeTrack === tid) state.activeTrack = null;
+      }
+      updateCounts(); renderChips(); drawFrame();
+    }
+  } else if (m === "move") {
+    const tid = hitTest(x, y);
+    if (tid) { state.edit.drag = tid; state.activeTrack = tid; renderChips(); }
+  }
+}
+function canvasMove(e) {
+  if (!state.edit || !state.edit.drag) return;
+  const [x, y] = canvasXY(e);
+  state.edit.tracks[state.edit.drag][String(currentFrame())] = [x, y];
+  drawFrame();
+}
+function canvasUp() {
+  if (state.edit && state.edit.drag) { state.edit.drag = null; updateCounts(); }
+}
+
+function diffCounts() {
+  const { base, tracks } = state.edit;
+  const flat = (tr) => {
+    const m = new Map();
+    for (const [tid, tmap] of Object.entries(tr))
+      for (const [f, p] of Object.entries(tmap)) m.set(`${tid}@${f}`, p);
+    return m;
+  };
+  const a = flat(base), b = flat(tracks);
+  let added = 0, deleted = 0, moved = 0;
+  for (const k of b.keys()) if (!a.has(k)) added++;
+  for (const k of a.keys()) if (!b.has(k)) deleted++;
+  for (const [k, p] of b) {
+    const q = a.get(k);
+    if (q && (Math.abs(q[0] - p[0]) > 1e-6 || Math.abs(q[1] - p[1]) > 1e-6)) moved++;
+  }
+  return { added, deleted, moved };
+}
+function updateCounts() {
+  if (!state.edit) return;
+  const c = diffCounts();
+  els.editCounts.textContent = `+${c.added} −${c.deleted} ↔${c.moved}`;
+  $("btn-save-edit").disabled = (c.added + c.deleted + c.moved) === 0;
+}
+
+async function saveEdit() {
+  const c = diffCounts();
+  try {
+    const r = await post(`/api/session/${encodeURIComponent(state.video)}/node/manual`, {
+      parent_id: state.edit.parentId, tracks: state.edit.tracks, counts: c });
+    state.session.nodes[r.node.id] = r.node;
+    state.session.selected_node_id = r.node.id;
+    cancelEdit(true);
+    await refreshSessions();
+    renderAll();
+    toast(`saved step #${r.node.id}: ${r.node.prompt}`);
+  } catch (e) { toast(`save failed: ${e.message}`); }
+}
+
+function cancelEdit(silent) {
+  if (!state.edit) return;
+  state.edit = null;
+  $("btn-edit").style.display = "";
+  els.editTools.style.display = "none";
+  els.canvas.classList.remove("editing");
+  els.editBanner.style.display = "none";
+  if (!silent) { renderChips(); drawFrame(); }
+}
+
+/* ================= model prompt ================= */
+async function runModel() {
+  if (!state.session || state.job) return;
+  const prompt = els.promptText.value.trim();
+  if (!prompt) { toast("type a correction prompt"); return; }
+  if (state.edit) { toast("save or cancel your point edits first"); return; }
+  const parentId = state.session.selected_node_id;
+  try {
+    const r = await post(`/api/session/${encodeURIComponent(state.video)}/node/model`,
+                         { parent_id: parentId, prompt });
+    state.job = { id: r.job_id, parentId, prompt, video: state.video };
+    els.btnRun.disabled = true;
+    els.jobStatus.className = "job-status";
+    els.jobStatus.textContent = `⏳ running model (job ${r.job_id})… the UI stays usable`;
+    renderTree();
+    pollJob();
+  } catch (e) {
+    els.jobStatus.className = "job-status err";
+    els.jobStatus.textContent = `✗ ${e.message}`;
+  }
+}
+
+async function pollJob() {
+  if (!state.job) return;
+  let j;
+  try { j = await api(`/api/jobs/${state.job.id}`); }
+  catch (e) { setTimeout(pollJob, 4000); return; }
+  if (j.status === "running") { setTimeout(pollJob, 2000); return; }
+  const jobVideo = state.job.video;
+  state.job = null;
+  els.btnRun.disabled = false;
+  if (j.status === "done") {
+    els.jobStatus.className = "job-status";
+    els.jobStatus.textContent = `✓ new step #${j.node.id}`;
+    els.promptText.value = "";
+    if (j.node.model_raw_output) {
+      els.rawDetails.style.display = "block";
+      els.rawPre.textContent = j.node.model_raw_output;
+    }
+    if (state.video === jobVideo) {
+      state.session = await api(`/api/session/${encodeURIComponent(jobVideo)}`);
+      renderAll();
+    }
+    await refreshSessions();
+  } else {
+    els.jobStatus.className = "job-status err";
+    els.jobStatus.textContent = `✗ model job failed: ${j.error || "unknown error"}`;
+    renderTree();
+  }
+}
+
+/* ================= export ================= */
+async function doExport() {
+  if (!state.session) return;
+  try {
+    const r = await post(`/api/session/${encodeURIComponent(state.video)}/export`,
+                         { leaf_node_id: state.session.selected_node_id });
+    toast(`exported ${r.n_steps} step(s) → ${r.path}`, 8000);
+  } catch (e) { toast(`export failed: ${e.message}`); }
+}
+
+init();
+</script>
+</body>
+</html>
