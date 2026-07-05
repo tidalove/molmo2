@@ -211,6 +211,9 @@ def load_videos(payload: LoadPayload):
                 meta["n_frames"] = (max(frames) + 1) if frames else None
             if not meta.get("n_frames"):
                 raise ValueError(f"no frames found under JPEGImages/{video}")
+            for step in steps:
+                step["tracks"] = track_io.clip_tracks(step["tracks"],
+                                                      meta["n_frames"])
             session = track_io.build_session(
                 video, _videos_dir() / f"{video}.mp4", meta,
                 {"kind": kind, "path": payload.source_path,
@@ -353,6 +356,7 @@ def _run_model_job(job_id: str, video: str, parent_id: str, prompt: str):
             raise ValueError(f"parent node {parent_id} disappeared")
         raw_text, tracks = State.runner.run_correction(session, parent["tracks"],
                                                        prompt)
+        tracks = track_io.clip_tracks(tracks, session["n_frames"])
         with State._lock:
             if parent_id not in session["nodes"]:
                 raise ValueError("parent node was deleted while the job ran")
@@ -376,7 +380,9 @@ def get_job(job_id: str):
 @app.get("/api/model/status")
 def model_status():
     if State.runner is None:
-        return {"state": "disabled"}
+        # model_dir set but runner not created yet = the background import of
+        # inference/vllm is still running
+        return {"state": "loading"} if State.model_dir else {"state": "disabled"}
     return State.runner.status()
 
 

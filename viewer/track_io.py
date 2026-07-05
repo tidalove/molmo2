@@ -77,6 +77,21 @@ def extracted_to_tracks(point_tracks):
     return tracks
 
 
+def clip_tracks(tracks, n_frames):
+    """Drop points at frames >= n_frames (model timestamps can round to one
+    frame past the end, e.g. 60.0s -> frame 120 of a 120-frame video; such
+    points would be silently lost by the jsonl loaders on export round-trip)."""
+    out, dropped = {}, 0
+    for tid, tmap in tracks.items():
+        kept = {f: p for f, p in tmap.items() if int(f) < n_frames}
+        dropped += len(tmap) - len(kept)
+        if kept:
+            out[tid] = kept
+    if dropped:
+        log.warning("clip_tracks: dropped %d out-of-range point(s)", dropped)
+    return out
+
+
 def _sorted_track_ids(tracks):
     """Sort ids numerically when possible (matches sorted(track_ids) of ints
     in CFCMultiTurn._build_video_annotation)."""
