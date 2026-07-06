@@ -83,6 +83,7 @@ input[type=text]:focus, textarea:focus { outline: none; border-color: #3b82f6; }
 .frame-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 4px; overflow: hidden; position: relative; min-height: 120px; }
 #canvas { max-width: 100%; max-height: 100%; }
 #canvas.editing { cursor: crosshair; }
+#canvas.panning { cursor: grabbing; }
 .frame-info { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; }
 .edit-banner { position: absolute; top: 8px; right: 8px; background: rgba(90,30,150,0.85); padding: 4px 10px; border-radius: 3px; font-size: 12px; color: #fff; pointer-events: none; display: none; }
 .controls { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
@@ -181,6 +182,7 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
         <button id="next">&raquo;</button>
         <label class="toggle"><input type="checkbox" id="only-point-frames"> Only frames with points</label>
         <label class="toggle"><input type="checkbox" id="show-trails" checked> Trails</label>
+        <button id="btn-reset-view" title="Reset zoom (key: 0) — scroll to zoom, Space/middle-drag to pan">1×</button>
       </div>
       <div class="bottom">
         <div class="chips" id="chips"></div>
@@ -225,6 +227,9 @@ const state = {
   edit: null,          // {parentId, base, tracks, mode, drag}
   job: null,           // {id, parentId, prompt, video}
   imgCache: new Map(),
+  view: { zoom: 1, panX: 0, panY: 0 },  // canvas backing-store space
+  panDrag: null,       // {bx, by, panX, panY} while pan-dragging
+  spaceDown: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -446,6 +451,7 @@ function renderVideoList() {
 async function openVideo(video) {
   if (state.edit && !confirm("Discard unsaved point edits?")) return;
   cancelEdit(true);
+  state.view = { zoom: 1, panX: 0, panY: 0 };
   state.video = video;
   state.session = await api(`/api/session/${encodeURIComponent(video)}`);
   state.hidden = new Set();
@@ -603,12 +609,18 @@ async function drawFrame() {
   let img = null;
   try { img = await loadImage(s.video, frame); } catch (e) { /* draw without */ }
   if (currentFrame() !== frame) return;  // user moved on while loading
-  els.canvas.width = s.width;
+  els.canvas.width = s.width;    // NOTE: also resets the ctx transform
   els.canvas.height = s.height;
+  const v = state.view;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, s.width, s.height);
+  ctx.setTransform(v.zoom, 0, 0, v.zoom, v.panX, v.panY);
+  ctx.imageSmoothingEnabled = v.zoom < 2;  // crisp sonar pixels when zoomed
   if (img) ctx.drawImage(img, 0, 0, s.width, s.height);
   else { ctx.fillStyle = "#300"; ctx.fillRect(0, 0, s.width, s.height); }
 
-  const scale = els.canvas.clientWidth > 0 ? s.width / els.canvas.clientWidth : 1;
+  // constant *screen* size for markers/labels at any zoom
+  const scale = (els.canvas.clientWidth > 0 ? s.width / els.canvas.clientWidth : 1) / v.zoom;
   const tracks = displayTracks();
   const fstr = String(frame);
   let shown = 0;
@@ -641,6 +653,7 @@ async function drawFrame() {
   const t = (frame / s.video_fps).toFixed(1);
   els.frameInfo.textContent =
     `frame ${frame} (${t}s) · ${shown} point${shown === 1 ? "" : "s"} · [${state.cursor + 1}/${state.frameList.length}]`
+    + (v.zoom > 1 ? ` · ${v.zoom.toFixed(1)}×` : "")
     + (state.edit ? " · EDITING" : "");
 }
 
@@ -703,13 +716,28 @@ function bindViewer() {
   els.canvas.addEventListener("mousedown", canvasDown);
   els.canvas.addEventListener("mousemove", canvasMove);
   window.addEventListener("mouseup", canvasUp);
+  els.canvas.addEventListener("wheel", (e) => {
+    if (!state.session) return;
+    e.preventDefault();
+    const [bx, by] = canvasBackingXY(e);
+    setZoom(state.view.zoom * (e.deltaY < 0 ? 1.25 : 0.8), bx, by);
+  }, { passive: false });
+  els.canvas.addEventListener("auxclick", (e) => e.preventDefault()); // middle-click
+  $("btn-reset-view").onclick = resetView;
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+    if (e.key === " ") { state.spaceDown = true; e.preventDefault(); return; }
     if (e.key === "ArrowLeft") moveCursor(-1);
     else if (e.key === "ArrowRight") moveCursor(1);
+    else if (e.key === "+" || e.key === "=") zoomAtCenter(1.25);
+    else if (e.key === "-") zoomAtCenter(0.8);
+    else if (e.key === "0") resetView();
     else if (e.key === "a" && state.edit) setMode("add");
     else if (e.key === "m" && state.edit) setMode("move");
     else if (e.key === "d" && state.edit) setMode("del");
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key === " ") state.spaceDown = false;
   });
   let rt = null;
   window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawFrame, 80); });
@@ -772,17 +800,51 @@ function newTrack() {
   toast(`new track ${tid} — click the canvas to place its points`, 2500);
 }
 
-function canvasXY(e) {
+function canvasBackingXY(e) {
   const rect = els.canvas.getBoundingClientRect();
   const sx = els.canvas.width / rect.width;
   const sy = els.canvas.height / rect.height;
   return [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
 }
 
+function canvasXY(e) {
+  // mouse -> native image pixels (inverse of the view transform)
+  const [bx, by] = canvasBackingXY(e);
+  const v = state.view;
+  return [(bx - v.panX) / v.zoom, (by - v.panY) / v.zoom];
+}
+
+/* ---- zoom / pan ---- */
+function clampPan() {
+  const v = state.view, w = els.canvas.width, h = els.canvas.height;
+  v.panX = Math.min(0, Math.max(w - w * v.zoom, v.panX));
+  v.panY = Math.min(0, Math.max(h - h * v.zoom, v.panY));
+}
+
+function setZoom(newZoom, bx, by) {
+  // bx,by = anchor in backing-store coords: that image point stays put
+  const v = state.view;
+  newZoom = Math.max(1, Math.min(24, newZoom));
+  if (newZoom === 1) { v.zoom = 1; v.panX = 0; v.panY = 0; }
+  else {
+    const ix = (bx - v.panX) / v.zoom, iy = (by - v.panY) / v.zoom;
+    v.zoom = newZoom;
+    v.panX = bx - ix * newZoom;
+    v.panY = by - iy * newZoom;
+    clampPan();
+  }
+  drawFrame();
+}
+
+function resetView() { setZoom(1, 0, 0); }
+function zoomAtCenter(factor) {
+  setZoom(state.view.zoom * factor, els.canvas.width / 2, els.canvas.height / 2);
+}
+
 function hitTest(x, y) {
   // nearest visible point at the current frame within threshold
   const frame = String(currentFrame());
-  const thr = 12 * (els.canvas.width / els.canvas.clientWidth);
+  const thr = 12 * (els.canvas.width / els.canvas.clientWidth) / state.view.zoom;
   let best = null, bestD = thr;
   for (const [tid, tmap] of Object.entries(state.edit.tracks)) {
     if (state.hidden.has(tid)) continue;
@@ -795,7 +857,15 @@ function hitTest(x, y) {
 }
 
 function canvasDown(e) {
-  if (!state.edit) return;
+  if (!state.session) return;
+  // pan: middle button, Space+drag, or plain drag when not editing
+  if (e.button === 1 || state.spaceDown || !state.edit) {
+    e.preventDefault();
+    const [bx, by] = canvasBackingXY(e);
+    state.panDrag = { bx, by, panX: state.view.panX, panY: state.view.panY };
+    els.canvas.classList.add("panning");
+    return;
+  }
   const [x, y] = canvasXY(e);
   const frame = String(currentFrame());
   const m = state.edit.mode;
@@ -819,12 +889,21 @@ function canvasDown(e) {
   }
 }
 function canvasMove(e) {
+  if (state.panDrag) {
+    const [bx, by] = canvasBackingXY(e);
+    state.view.panX = state.panDrag.panX + (bx - state.panDrag.bx);
+    state.view.panY = state.panDrag.panY + (by - state.panDrag.by);
+    clampPan();
+    drawFrame();
+    return;
+  }
   if (!state.edit || !state.edit.drag) return;
   const [x, y] = canvasXY(e);
   state.edit.tracks[state.edit.drag][String(currentFrame())] = [x, y];
   drawFrame();
 }
 function canvasUp() {
+  if (state.panDrag) { state.panDrag = null; els.canvas.classList.remove("panning"); }
   if (state.edit && state.edit.drag) { state.edit.drag = null; updateCounts(); }
 }
 

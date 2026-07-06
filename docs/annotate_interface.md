@@ -66,6 +66,11 @@ error instead of crashing the app; reallocate with more memory and restart
      "frame N" phrases are rewritten to seconds like the training data.
    - Track chips: click = active track (edit target), double-click = hide/show.
      Slider/←→ scrub frames; "Only frames with points" filters the slider.
+   - **Zoom/pan**: scroll wheel zooms toward the cursor (1×–24×); pan with
+     middle-drag, Space+drag, or plain drag when not in edit mode. Keys:
+     `+`/`-` zoom at center, `0` (or the `1×` button) resets. The view persists
+     across frame scrubs and tree clicks; point editing works at any zoom —
+     markers and hit radii stay constant on screen.
 4. **Export**: with a leaf selected, `Export path → jsonl` appends the root→leaf
    chain as one standard trajectory-annotation jsonl line
    (`{session_dir}/exports/{video}_export.jsonl`), compatible with
