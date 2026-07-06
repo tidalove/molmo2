@@ -10,19 +10,20 @@ branches.
 
 ```bash
 # on an A100 node, repo root, molmo2 env
-MOLMO_DATA_DIR=data python viewer/annotate_app.py            # port 6006, loads model in background
-# or GPU-free (manual edits, browsing, export still work):
-MOLMO_DATA_DIR=data python viewer/annotate_app.py --no-model
+MOLMO_DATA_DIR=data python viewer/annotate_app.py            # port 6006; GPU untouched until you load a model
 
 # from your laptop:
 ssh -L 6006:localhost:6006 <a100-node>   # then open http://localhost:6006
 ```
 
-The model (`--model_dir`, default `runs/cfc_all_real_llm_connector_vit/step300-hf`)
-loads in a background thread (~2.5 min); the UI is usable immediately. The
-sidebar pill shows `loading… / ready / error` — a CUDA OOM shows up there as an
-error instead of crashing the app; reallocate with more memory and restart
-(sessions survive restarts).
+The server starts GPU-free. The **model is picked in the UI** (setup step 1,
+exact path or filesystem browse; `--model_dir` only prefills the input) and
+loads in a background thread (~2.5 min) once you press **Load model** — keep
+picking predictions/videos meanwhile. The sidebar pill shows
+`not loaded / loading… / ready / error` — a CUDA OOM shows up there as an error
+instead of crashing the app; reallocate with more memory and restart (sessions
+survive restarts). **One checkpoint per process**: switching checkpoints
+requires a server restart (vLLM can't reliably free GPU memory in-process).
 
 ## CLI
 
@@ -30,17 +31,24 @@ error instead of crashing the app; reallocate with more memory and restart
 |---|---|---|
 | `--data_dir` | `data/video_datasets/video_track/CFC` | needs `videos/`, `JPEGImages/`, `annotations/` |
 | `--session_dir` | `viewer/annotate_sessions` | per-video tree JSONs + `exports/` |
-| `--model_dir` | `runs/cfc_all_real_llm_connector_vit/step300-hf` | HF checkpoint for vLLM |
-| `--no-model` | off | never touch vLLM/GPU |
+| `--model_dir` | `runs/cfc_all_real_llm_connector_vit/step300-hf` | default checkpoint path prefilled in the UI (nothing loads at startup) |
 | `--export_box_size` | `20` | bbox side (px) written around each point on export |
 | `--port` / `--host` | `6006` / `0.0.0.0` | |
 
 ## Workflow
 
-1. **Load videos** (setup panel): tick videos from the searchable list (backed by
-   `data_dir/videos/*.mp4`; if the dir is missing the list is empty and you paste
-   exact names instead), pick a predictions source, **Confirm & Load**. Frames and
-   metadata are only read at this point.
+1. **Setup panel**, in order:
+   1. **Model** — checkpoint path (prefilled from `--model_dir`) or Browse
+      (pick a *directory*; it must contain `config.json`), then **Load model**.
+      Loading runs in the background while you continue.
+   2. **Predictions (optional)** — pick a source file; after **Inspect**, the
+      video list below is *filtered to the videos present in that file*. Or tick
+      **Start without predictions**: each video gets a single empty root node and
+      the first tracks come from the **▶ Track all fish** button (initial-tracking
+      inference) or from manual points.
+   3. **Videos** — tick from the searchable list (backed by `data_dir/videos/*.mp4`;
+      if the dir is missing the list is empty and you paste exact names instead).
+   4. **Confirm & Load** — frames and metadata are only read at this point.
 2. **Source formats** (auto-detected):
    - `predictions.json` (vLLM eval output) — reconstructed as a 2-node chain:
      root = step0 tracks parsed from the stored `input` chat, child = the model's
@@ -64,6 +72,10 @@ error instead of crashing the app; reallocate with more memory and restart
      window can't fit more; steps are never chained). Job runs in the background
      (~2 min on an A100); a ⏳ ghost node shows in the tree; the UI stays usable.
      "frame N" phrases are rewritten to seconds like the training data.
+     `Run model` is disabled while the selected step has **no tracks** — an empty
+     context would make a degenerate correction prompt; use **▶ Track all fish**
+     instead, which runs single-turn initial-tracking inference (same prompt path
+     as the `cfc_track_eval` pipeline) and adds a `model` node under the empty step.
    - Track chips: click = active track (edit target), double-click = hide/show.
      Slider/←→ scrub frames; "Only frames with points" filters the slider.
    - **Zoom/pan**: scroll wheel zooms toward the cursor (1×–24×); pan with
@@ -93,9 +105,9 @@ viewer/annotate.html     single vanilla-JS page (canvas editor, tree, prompt box
 viewer/track_io.py       pure data layer: source loaders, session schema,
                          conversions, export (coordinate conventions documented
                          in its module docstring; NO vllm imports)
-viewer/inference.py      ModelRunner: vLLM load + one-correction-step inference;
-                         reuses scripts/run_vllm.py's build_multi_turn_chat and
-                         DataFormatter config
+viewer/inference.py      ModelRunner: vLLM load + inference (run_correction /
+                         run_tracking); reuses scripts/run_vllm.py's
+                         build_multi_turn_chat and DataFormatter config
 ```
 
 Canonical coordinates everywhere in the app: **pixels + native-fps frame
@@ -105,9 +117,14 @@ indices**. The model's 0-1000 scale / seconds exist only at the model boundary
 The prompt path is regression-tested against the eval pipeline: rebuilding the
 chat for an eel example reproduces the `input` string stored in
 `runs/.../cfc_correction_eel_even_eval_2fps/eel/predictions.json` byte-for-byte.
-Gotcha if you touch it: the final turn's `points` must be non-empty, otherwise
+Gotcha if you touch it: with empty `points`,
 `DataFormatter.format_video_object_track_points` ignores the `question` and
-substitutes a template prompt (data_formatter.py:1446).
+substitutes a template prompt (data_formatter.py:1446). In the *correction*
+chat the final turn therefore reuses the parent tracks as its `points`; in the
+*initial-tracking* chat (`build_track_chat`) `points=[]` is deliberate — the
+substituted template is exactly the `cfc_track_eval` prompt (verified
+byte-for-byte against the `input` field of
+`runs/.../cfc_track_eval_2fps/validation-v2/predictions.json`).
 
 ## Frames
 

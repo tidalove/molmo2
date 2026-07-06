@@ -6,14 +6,14 @@ Each refinement is a node in a branching tree per video; sessions autosave to
 --session_dir after every mutation and survive restarts.
 
 Usage:
-    # GPU-free (browse / manual edits / tree / export):
-    python viewer/annotate_app.py --no-model
-
-    # with the correction model (loads in a background thread at startup):
-    python viewer/annotate_app.py \
-        --model_dir runs/cfc_all_real_llm_connector_vit/step300-hf
-
+    python viewer/annotate_app.py
     # then tunnel:  ssh -L 6006:localhost:6006 <a100-node>
+
+The model checkpoint is picked IN THE UI (setup step 1) and loads in a
+background thread via POST /api/model/load; until then the app is fully
+usable GPU-free (browse / manual edits / tree / export). One checkpoint per
+process: switching checkpoints requires an app restart (vLLM cannot reliably
+free GPU memory in-process).
 
 See docs/annotate_interface.md for the full guide and viewer/track_io.py for
 data formats + coordinate conventions.
@@ -45,7 +45,8 @@ app = FastAPI(title="Track Correction Annotator")
 class State:
     data_dir: Path = None
     session_dir: Path = None
-    model_dir: str | None = None
+    default_model_dir: str = DEFAULT_MODEL_DIR   # prefilled in the UI
+    model_dir: str | None = None                 # set once /api/model/load runs
     export_box_size: float = 20.0
     sessions: dict = {}          # video -> session dict (mirrors disk)
     jobs: dict = {}              # job_id -> {status, video, parent_id, prompt, node?, error?}
@@ -101,8 +102,8 @@ def get_config():
         "data_dir": str(State.data_dir),
         "videos_dir": str(_videos_dir()),
         "session_dir": str(State.session_dir),
+        "default_model_dir": State.default_model_dir,
         "model_dir": State.model_dir,
-        "model_enabled": State.runner is not None,
         "videos_listing_ok": _videos_dir().is_dir(),
         "export_box_size": State.export_box_size,
     }
@@ -177,7 +178,7 @@ def inspect_source(payload: InspectPayload):
 
 class LoadPayload(BaseModel):
     videos: list[str]
-    source_path: str
+    source_path: str | None = None   # None/empty = start from an empty root
     trajectory_id: int | None = None
     force_reinit: bool = False
 
@@ -186,7 +187,11 @@ class LoadPayload(BaseModel):
 def load_videos(payload: LoadPayload):
     """Create (or resume) a session per video. First point where frames and
     metadata are touched — nothing is loaded before the user confirms."""
-    kind, err = track_io.detect_source(payload.source_path)
+    source_path = (payload.source_path or "").strip() or None
+    if source_path:
+        kind, err = track_io.detect_source(source_path)
+    else:
+        kind, err = "none", None
     results = []
     for video in payload.videos:
         video = video.strip().removesuffix(".mp4")
@@ -200,8 +205,15 @@ def load_videos(payload: LoadPayload):
                 continue
             if err:
                 raise ValueError(f"bad source file: {err}")
-            steps, meta = track_io.load_source_for_video(
-                payload.source_path, kind, video, payload.trajectory_id)
+            if source_path:
+                steps, meta = track_io.load_source_for_video(
+                    source_path, kind, video, payload.trajectory_id)
+            else:
+                # no predictions: single empty root; first tracks come from the
+                # "Track all fish" model button or from manual point edits
+                steps = [{"prompt": track_io.DEFAULT_ROOT_PROMPT, "kind": "root",
+                          "tracks": {}, "model_raw_output": None}]
+                meta = {}
             meta = track_io.get_video_meta(State.data_dir, video, meta)
             if not (meta.get("width") and meta.get("height")):
                 raise ValueError("could not determine video dimensions "
@@ -216,7 +228,7 @@ def load_videos(payload: LoadPayload):
                                                       meta["n_frames"])
             session = track_io.build_session(
                 video, _videos_dir() / f"{video}.mp4", meta,
-                {"kind": kind, "path": payload.source_path,
+                {"kind": kind, "path": source_path,
                  "trajectory_id": payload.trajectory_id},
                 steps)
             with State._lock:
@@ -318,13 +330,14 @@ def delete_node(video: str, node_id: str):
 
 class ModelPayload(BaseModel):
     parent_id: str
-    prompt: str
+    prompt: str = ""
+    mode: str = "correction"    # "correction" | "track" (initial tracking)
 
 
 @app.post("/api/session/{video}/node/model")
 def add_model_node(video: str, payload: ModelPayload):
     if State.runner is None:
-        raise HTTPException(409, "model disabled (--no-model); manual edits only")
+        raise HTTPException(409, "no model loaded; pick a checkpoint in setup")
     status = State.runner.status()
     if status["state"] != "ready":
         raise HTTPException(409, f"model not ready: {status['state']}"
@@ -332,7 +345,12 @@ def add_model_node(video: str, payload: ModelPayload):
     s = _get_session(video)
     if payload.parent_id not in s["nodes"]:
         raise HTTPException(400, f"unknown node {payload.parent_id!r}")
-    if not payload.prompt.strip():
+    if payload.mode not in ("correction", "track"):
+        raise HTTPException(400, f"unknown mode {payload.mode!r}")
+    prompt = payload.prompt.strip()
+    if payload.mode == "track":
+        prompt = s.get("root_prompt", track_io.DEFAULT_ROOT_PROMPT)
+    elif not prompt:
         raise HTTPException(400, "empty prompt")
     with State._lock:
         if any(j["status"] == "running" for j in State.jobs.values()):
@@ -340,22 +358,27 @@ def add_model_node(video: str, payload: ModelPayload):
         job_id = uuid.uuid4().hex[:12]
         State.jobs[job_id] = {"status": "running", "video": video,
                               "parent_id": payload.parent_id,
-                              "prompt": payload.prompt}
+                              "prompt": prompt, "mode": payload.mode}
     threading.Thread(target=_run_model_job,
-                     args=(job_id, video, payload.parent_id, payload.prompt),
+                     args=(job_id, video, payload.parent_id, prompt,
+                           payload.mode),
                      daemon=True).start()
     return {"job_id": job_id}
 
 
-def _run_model_job(job_id: str, video: str, parent_id: str, prompt: str):
+def _run_model_job(job_id: str, video: str, parent_id: str, prompt: str,
+                   mode: str = "correction"):
     job = State.jobs[job_id]
     try:
         session = State.sessions[video]
         parent = session["nodes"].get(parent_id)
         if parent is None:
             raise ValueError(f"parent node {parent_id} disappeared")
-        raw_text, tracks = State.runner.run_correction(session, parent["tracks"],
-                                                       prompt)
+        if mode == "track":
+            raw_text, tracks = State.runner.run_tracking(session)
+        else:
+            raw_text, tracks = State.runner.run_correction(
+                session, parent["tracks"], prompt)
         tracks = track_io.clip_tracks(tracks, session["n_frames"])
         with State._lock:
             if parent_id not in session["nodes"]:
@@ -377,13 +400,61 @@ def get_job(job_id: str):
     return job
 
 
+class ModelLoadPayload(BaseModel):
+    model_dir: str
+
+
+@app.post("/api/model/load")
+def model_load(payload: ModelLoadPayload):
+    """Start loading a checkpoint in a background thread. One checkpoint per
+    process: vLLM cannot reliably free GPU memory in-process, so switching
+    requires an app restart."""
+    model_dir = payload.model_dir.strip()
+    p = Path(model_dir).expanduser()
+    if not p.is_dir():
+        raise HTTPException(400, f"not a directory: {model_dir}")
+    if not (p / "config.json").exists():
+        raise HTTPException(400, f"no config.json in {model_dir} — "
+                            "expected a HF checkpoint directory")
+    with State._lock:
+        if State.model_dir is not None:
+            if Path(State.model_dir).resolve() == p.resolve():
+                return {"ok": True, "model_dir": State.model_dir,
+                        "already": True}
+            raise HTTPException(
+                409, f"checkpoint {State.model_dir} already loading/loaded; "
+                     "restart the app to switch checkpoints")
+        State.model_dir = model_dir
+
+    def _boot():
+        # Import (pulls vllm) and load in the background so the UI stays
+        # usable; load failures (e.g. CUDA OOM) land in /api/model/status.
+        try:
+            import inference
+            State.runner = inference.ModelRunner(State.model_dir)
+            State.runner.load()
+        except Exception:  # noqa: BLE001
+            log.exception("model boot failed")
+            if State.runner is None:
+                import types
+                err = "import of inference/vllm failed; see server log"
+                State.runner = types.SimpleNamespace(
+                    status=lambda: {"state": "error", "error": err},
+                    run_correction=None, run_tracking=None)
+    threading.Thread(target=_boot, daemon=True).start()
+    return {"ok": True, "model_dir": model_dir, "already": False}
+
+
 @app.get("/api/model/status")
 def model_status():
     if State.runner is None:
         # model_dir set but runner not created yet = the background import of
         # inference/vllm is still running
-        return {"state": "loading"} if State.model_dir else {"state": "disabled"}
-    return State.runner.status()
+        out = {"state": "loading"} if State.model_dir else {"state": "not_loaded"}
+    else:
+        out = State.runner.status()
+    out["model_dir"] = State.model_dir
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +491,8 @@ def main():
     parser.add_argument("--session_dir", default="viewer/annotate_sessions",
                         help="Where per-video session JSONs (the trees) live")
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR,
-                        help="HF checkpoint for the correction model")
-    parser.add_argument("--no-model", action="store_true",
-                        help="Run without vLLM/GPU (manual edits still work)")
+                        help="Default HF checkpoint path prefilled in the UI "
+                             "(nothing loads until requested from the UI)")
     parser.add_argument("--export_box_size", type=float, default=20.0,
                         help="Side (px) of the fixed bbox written around each "
                              "point on jsonl export")
@@ -436,28 +506,9 @@ def main():
     State.session_dir = Path(args.session_dir)
     State.session_dir.mkdir(parents=True, exist_ok=True)
     State.export_box_size = args.export_box_size
-    State.model_dir = None if args.no_model else args.model_dir
+    State.default_model_dir = args.model_dir
 
-    if State.model_dir:
-        # Import (pulls vllm) and load in the background so the UI is usable
-        # immediately; load failures (e.g. CUDA OOM) land in /api/model/status.
-        def _boot():
-            try:
-                import inference
-                State.runner = inference.ModelRunner(State.model_dir)
-                State.runner.load()
-            except Exception:  # noqa: BLE001
-                log.exception("model boot failed")
-                if State.runner is None:
-                    import types
-                    err = "import of inference/vllm failed; see server log"
-                    State.runner = types.SimpleNamespace(
-                        status=lambda: {"state": "error", "error": err},
-                        run_correction=None)
-        threading.Thread(target=_boot, daemon=True).start()
-        print(f"Model:       {State.model_dir} (loading in background)")
-    else:
-        print("Model:       DISABLED (--no-model)")
+    print(f"Model:       pick in the UI (default {State.default_model_dir})")
     print(f"Data dir:    {State.data_dir}")
     print(f"Sessions:    {State.session_dir}")
     print(f"Listening on http://{args.host}:{args.port}")

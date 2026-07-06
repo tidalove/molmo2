@@ -131,17 +131,21 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
   <main class="main">
     <!-- ============ setup panel ============ -->
     <div class="setup" id="setup">
-      <h2>Load videos + initial predictions</h2>
+      <h2>Load model + predictions + videos</h2>
       <div class="card">
-        <h3>1 · Videos</h3>
-        <input type="text" id="vid-filter" placeholder="Filter videos (e.g. ARIS)…">
-        <div class="pick-list" id="vid-pick"></div>
-        <div class="hint" id="vid-pick-hint"></div>
-        <input type="text" id="vid-exact" placeholder="…or exact video names / paths, comma-separated">
-        <div class="hint">Selected: <span id="vid-selected">none</span></div>
+        <h3>1 · Model checkpoint</h3>
+        <div class="fs-row">
+          <input type="text" id="model-path" placeholder="Path to a HF checkpoint directory">
+          <button id="btn-model-browse">Browse</button>
+          <button class="primary" id="btn-model-load">Load model</button>
+        </div>
+        <div class="fs-list" id="model-fs-list" style="display:none"></div>
+        <div class="inspect-result" id="model-load-status">no model loaded — loading starts in the background; keep picking below</div>
+        <div class="hint">One checkpoint per app run — restart the server to switch.</div>
       </div>
       <div class="card">
-        <h3>2 · Initial predictions source</h3>
+        <h3>2 · Initial predictions source (optional)</h3>
+        <label class="toggle" style="font-size:12px"><input type="checkbox" id="no-preds"> Start without predictions (empty root — first tracks come from “Track all fish” or manual points)</label>
         <div class="fs-row">
           <input type="text" id="src-path" placeholder="Path to predictions.json / COCO json / trajectory jsonl">
           <button id="btn-browse">Browse</button>
@@ -154,7 +158,15 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
         </div>
       </div>
       <div class="card">
-        <h3>3 · Confirm</h3>
+        <h3>3 · Videos</h3>
+        <input type="text" id="vid-filter" placeholder="Filter videos (e.g. ARIS)…">
+        <div class="pick-list" id="vid-pick"></div>
+        <div class="hint" id="vid-pick-hint"></div>
+        <input type="text" id="vid-exact" placeholder="…or exact video names / paths, comma-separated">
+        <div class="hint">Selected: <span id="vid-selected">none</span></div>
+      </div>
+      <div class="card">
+        <h3>4 · Confirm</h3>
         <div class="hint">Frames and metadata are only read after you confirm. Existing sessions for the
           same videos are resumed (tick the box to reinitialize from the source instead).</div>
         <label class="toggle" style="font-size:12px"><input type="checkbox" id="force-reinit"> Reinitialize (discard existing session trees for these videos)</label>
@@ -201,6 +213,8 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
         </div>
         <div class="prompt-row">
           <textarea id="prompt-text" placeholder="Correction prompt for the model — runs off the SELECTED tree node (e.g. 'the track near the top at 3s is a false positive, remove it')"></textarea>
+          <button class="primary" id="btn-track" disabled style="display:none"
+                  title="Initial tracking inference on this video (no prior tracks in context)">▶ Track all fish</button>
           <button class="primary" id="btn-run" disabled>Run model</button>
         </div>
         <div class="job-status" id="job-status"></div>
@@ -226,6 +240,8 @@ const state = {
   activeTrack: null,   // chip-selected track id (edit target)
   edit: null,          // {parentId, base, tracks, mode, drag}
   job: null,           // {id, parentId, prompt, video}
+  modelState: "not_loaded",  // /api/model/status .state (drives run buttons)
+  srcVideos: null,     // Set of videos in the inspected predictions file (filters the pick list)
   imgCache: new Map(),
   view: { zoom: 1, panX: 0, panY: 0 },  // canvas backing-store space
   panDrag: null,       // {bx, by, panX, panY} while pan-dragging
@@ -239,6 +255,9 @@ const els = {
   setup: $("setup"), viewer: $("viewer"),
   vidFilter: $("vid-filter"), vidPick: $("vid-pick"), vidPickHint: $("vid-pick-hint"),
   vidExact: $("vid-exact"), vidSelected: $("vid-selected"),
+  modelPath: $("model-path"), modelFsList: $("model-fs-list"),
+  modelLoadStatus: $("model-load-status"), btnModelLoad: $("btn-model-load"),
+  noPreds: $("no-preds"),
   srcPath: $("src-path"), fsList: $("fs-list"), inspectResult: $("inspect-result"),
   trajPick: $("traj-pick"), trajSelect: $("traj-select"),
   forceReinit: $("force-reinit"), loadResults: $("load-results"),
@@ -247,7 +266,7 @@ const els = {
   prev: $("prev"), next: $("next"), slider: $("slider"),
   onlyPointFrames: $("only-point-frames"), showTrails: $("show-trails"),
   chips: $("chips"), editTools: $("edit-tools"), editCounts: $("edit-counts"),
-  promptText: $("prompt-text"), btnRun: $("btn-run"),
+  promptText: $("prompt-text"), btnRun: $("btn-run"), btnTrack: $("btn-track"),
   jobStatus: $("job-status"), rawDetails: $("raw-details"), rawPre: $("raw-pre"),
   toast: $("toast"),
 };
@@ -308,16 +327,36 @@ async function refreshSessions() {
 async function pollModel() {
   try {
     const s = await api("/api/model/status");
+    state.modelState = s.state;
     const pill = els.modelPill;
     pill.className = "pill";
     if (s.state === "ready") { pill.classList.add("ready"); pill.textContent = "model: ready"; }
     else if (s.state === "loading") { pill.classList.add("loading"); pill.textContent = "model: loading…"; }
     else if (s.state === "error") { pill.classList.add("error"); pill.textContent = "model: error"; pill.title = s.error || ""; }
+    else if (s.state === "not_loaded") { pill.textContent = "model: not loaded"; pill.title = "pick a checkpoint in setup"; }
     else pill.textContent = `model: ${s.state}`;
-    els.btnRun.disabled = s.state !== "ready" || !!state.job || !state.session;
-    if (s.state === "ready" || s.state === "disabled") setTimeout(pollModel, 15000);
+    renderModelCard(s);
+    updateRunButtons();
+    if (s.state === "ready" || s.state === "not_loaded") setTimeout(pollModel, 15000);
     else setTimeout(pollModel, 3000);
   } catch (e) { setTimeout(pollModel, 5000); }
+}
+
+function selectedNodeHasTracks() {
+  const n = selectedNode();
+  return !!n && Object.keys(n.tracks).length > 0;
+}
+
+function updateRunButtons() {
+  const busy = !!state.job || !state.session || state.modelState !== "ready" || !!state.edit;
+  const hasTracks = selectedNodeHasTracks();
+  // correction needs a previous step with tracks in context; an empty node
+  // gets the initial-tracking button instead
+  els.btnRun.disabled = busy || !hasTracks;
+  els.btnRun.title = (!busy && !hasTracks)
+    ? "Selected step has no tracks — use “Track all fish” or add points manually" : "";
+  els.btnTrack.style.display = (state.session && !hasTracks) ? "" : "none";
+  els.btnTrack.disabled = busy || hasTracks;
 }
 
 /* ================= setup panel ================= */
@@ -327,10 +366,51 @@ function showViewer() { els.setup.style.display = "none"; els.viewer.style.displ
 function bindSetup() {
   $("btn-open-setup").onclick = () => { showSetup(); refreshBrowse(); };
   els.vidFilter.addEventListener("input", debounce(refreshBrowse, 250));
-  $("btn-browse").onclick = () => browseFs(els.srcPath.value || state.config.data_dir);
+  // editing the source path invalidates the current video filter until re-inspect
+  els.srcPath.addEventListener("input", debounce(() => {
+    if (state.srcVideos) { state.srcVideos = null; refreshBrowse(); }
+  }, 400));
+  els.modelPath.value = state.config.model_dir || state.config.default_model_dir || "";
+  $("btn-model-browse").onclick = () => browseFs(
+    els.modelPath.value || state.config.default_model_dir || ".",
+    { listEl: els.modelFsList, pickDir: (p) => { els.modelPath.value = p; } });
+  els.btnModelLoad.onclick = loadModel;
+  els.noPreds.onchange = () => {
+    const off = els.noPreds.checked;
+    els.srcPath.disabled = $("btn-browse").disabled = $("btn-inspect").disabled = off;
+    if (off) { state.srcVideos = null; els.trajPick.style.display = "none";
+               els.inspectResult.textContent = ""; refreshBrowse(); }
+  };
+  $("btn-browse").onclick = () => browseFs(
+    els.srcPath.value || state.config.data_dir,
+    { listEl: els.fsList,
+      pickFile: (p) => { els.srcPath.value = p; inspectSource(); } });
   $("btn-inspect").onclick = inspectSource;
   $("btn-load").onclick = confirmLoad;
   refreshBrowse();
+}
+
+async function loadModel() {
+  const model_dir = els.modelPath.value.trim();
+  if (!model_dir) { toast("enter a checkpoint path"); return; }
+  try {
+    const r = await post("/api/model/load", { model_dir });
+    els.modelLoadStatus.textContent = r.already
+      ? `already loading/loaded: ${r.model_dir}`
+      : `⏳ loading ${r.model_dir} in the background — keep picking below`;
+    pollModel();
+  } catch (e) { els.modelLoadStatus.innerHTML = `<span style="color:#fca5a5">✗ ${escapeHtml(e.message)}</span>`; }
+}
+
+function renderModelCard(s) {
+  const locked = s.state === "loading" || s.state === "ready";
+  els.modelPath.disabled = locked;
+  els.btnModelLoad.disabled = locked;
+  $("btn-model-browse").disabled = locked;
+  if (s.state === "ready") els.modelLoadStatus.textContent = `✓ ready: ${s.model_dir}`;
+  else if (s.state === "loading") els.modelLoadStatus.textContent = `⏳ loading ${s.model_dir}… (a few minutes; UI stays usable)`;
+  else if (s.state === "error") els.modelLoadStatus.innerHTML =
+    `<span style="color:#fca5a5">✗ load failed: ${escapeHtml(s.error || "see server log")} — restart the server to retry</span>`;
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
@@ -343,7 +423,16 @@ async function refreshBrowse() {
       els.vidPickHint.textContent = "Video directory not listable — paste exact names below.";
       return;
     }
-    for (const v of r.videos) {
+    // with a predictions source inspected, only offer the videos it contains
+    let videos = r.videos;
+    let filterNote = "";
+    if (state.srcVideos) {
+      videos = videos.filter(v => state.srcVideos.has(v));
+      const missing = [...state.srcVideos].filter(v => !r.videos.includes(v));
+      filterNote = ` · filtered to the ${state.srcVideos.size} video(s) in the predictions file`;
+      if (missing.length && !q) filterNote += ` (${missing.length} of them have no mp4 on disk: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""})`;
+    }
+    for (const v of videos) {
       const it = document.createElement("label");
       it.className = "pick-item";
       const cb = document.createElement("input");
@@ -354,7 +443,7 @@ async function refreshBrowse() {
       it.appendChild(document.createTextNode(" " + v));
       els.vidPick.appendChild(it);
     }
-    els.vidPickHint.textContent = r.truncated ? `showing first ${r.videos.length} — narrow the filter` : `${r.videos.length} match(es)`;
+    els.vidPickHint.textContent = (r.truncated ? `showing first ${videos.length} — narrow the filter` : `${videos.length} match(es)`) + filterNote;
   } catch (e) {
     els.vidPickHint.textContent = `listing failed (${e.message}) — paste exact names below.`;
   }
@@ -363,29 +452,44 @@ function renderPicked() {
   els.vidSelected.textContent = setupPick.size ? [...setupPick].join(", ") : "none";
 }
 
-async function browseFs(path) {
+async function browseFs(path, opts) {
+  // opts: {listEl, pickFile?, pickDir?} — pickDir adds a "use this directory"
+  // entry (model checkpoints are directories, not files)
+  const list = opts.listEl;
   try {
     const r = await api(`/api/browse/fs?path=${encodeURIComponent(path)}`);
-    if (r.is_file) { els.srcPath.value = r.path; els.fsList.style.display = "none"; return; }
+    if (r.is_file) {
+      if (opts.pickFile) opts.pickFile(r.path);
+      list.style.display = "none";
+      return;
+    }
     if (r.error) { toast(`browse: ${r.error}`); return; }
-    els.fsList.style.display = "block";
-    els.fsList.innerHTML = "";
+    list.style.display = "block";
+    list.innerHTML = "";
+    if (opts.pickDir) {
+      const use = document.createElement("div");
+      use.className = "fs-entry dir";
+      use.textContent = "✓ Use this directory: " + r.path;
+      use.onclick = () => { opts.pickDir(r.path); list.style.display = "none"; };
+      list.appendChild(use);
+    }
     const up = document.createElement("div");
     up.className = "fs-entry dir";
     up.textContent = "⬆ ..";
-    up.onclick = () => browseFs(r.parent);
-    els.fsList.appendChild(up);
+    up.onclick = () => browseFs(r.parent, opts);
+    list.appendChild(up);
     for (const d of r.dirs) {
       const e = document.createElement("div");
       e.className = "fs-entry dir"; e.textContent = "📁 " + d;
-      e.onclick = () => browseFs(r.path + "/" + d);
-      els.fsList.appendChild(e);
+      e.onclick = () => browseFs(r.path + "/" + d, opts);
+      list.appendChild(e);
     }
     for (const f of r.files) {
       const e = document.createElement("div");
       e.className = "fs-entry"; e.textContent = "📄 " + f;
-      e.onclick = () => { els.srcPath.value = r.path + "/" + f; els.fsList.style.display = "none"; inspectSource(); };
-      els.fsList.appendChild(e);
+      if (opts.pickFile) e.onclick = () => { opts.pickFile(r.path + "/" + f); list.style.display = "none"; };
+      else if (opts.pickDir) e.onclick = () => { opts.pickDir(r.path); list.style.display = "none"; };
+      list.appendChild(e);
     }
   } catch (e) { toast(`browse failed: ${e.message}`); }
 }
@@ -399,6 +503,8 @@ async function inspectSource() {
     const r = await post("/api/inspect_source", { path });
     if (r.error) { els.inspectResult.innerHTML = `<span style="color:#fca5a5">✗ ${escapeHtml(r.error)}</span>`; return; }
     els.inspectResult.textContent = `✓ ${r.kind} — ${r.videos.length} video(s)`;
+    state.srcVideos = new Set(r.videos);
+    refreshBrowse();
     // trajectory dropdown only when some video has >1 trajectory
     const byVideo = {};
     for (const t of (r.trajectories || [])) (byVideo[t.video] = byVideo[t.video] || []).push(t);
@@ -420,10 +526,13 @@ async function confirmLoad() {
   const videos = [...setupPick];
   for (const v of els.vidExact.value.split(",").map(s => s.trim()).filter(Boolean)) videos.push(v);
   if (!videos.length) { toast("pick at least one video"); return; }
-  const source_path = els.srcPath.value.trim();
-  if (!source_path) { toast("pick a predictions source file"); return; }
+  const noPreds = els.noPreds.checked;
+  const source_path = noPreds ? null : els.srcPath.value.trim();
+  if (!noPreds && !source_path) {
+    toast("pick a predictions source file (or tick “Start without predictions”)"); return;
+  }
   const body = { videos, source_path, force_reinit: els.forceReinit.checked };
-  if (els.trajPick.style.display !== "none") body.trajectory_id = parseInt(els.trajSelect.value, 10);
+  if (!noPreds && els.trajPick.style.display !== "none") body.trajectory_id = parseInt(els.trajSelect.value, 10);
   els.loadResults.textContent = "loading… (first touch of frames/metadata)";
   try {
     const r = await post("/api/load", body);
@@ -474,6 +583,7 @@ function renderAll() {
   renderTopbar();
   renderTree();
   renderChips();
+  updateRunButtons();
   updateFrameList(true);
 }
 
@@ -712,6 +822,7 @@ function bindViewer() {
   $("btn-save-edit").onclick = saveEdit;
   $("btn-cancel-edit").onclick = () => cancelEdit(false);
   $("btn-run").onclick = runModel;
+  $("btn-track").onclick = runTrack;
   $("btn-export").onclick = doExport;
   els.canvas.addEventListener("mousedown", canvasDown);
   els.canvas.addEventListener("mousemove", canvasMove);
@@ -771,6 +882,7 @@ function startEdit() {
   setMode("add");
   updateCounts();
   renderChips();
+  updateRunButtons();
   drawFrame();
 }
 
@@ -953,21 +1065,32 @@ function cancelEdit(silent) {
   els.editTools.style.display = "none";
   els.canvas.classList.remove("editing");
   els.editBanner.style.display = "none";
+  updateRunButtons();
   if (!silent) { renderChips(); drawFrame(); }
 }
 
 /* ================= model prompt ================= */
 async function runModel() {
-  if (!state.session || state.job) return;
   const prompt = els.promptText.value.trim();
   if (!prompt) { toast("type a correction prompt"); return; }
+  startModelJob("correction", prompt);
+}
+
+function runTrack() {
+  startModelJob("track", "");
+}
+
+async function startModelJob(mode, prompt) {
+  if (!state.session || state.job) return;
   if (state.edit) { toast("save or cancel your point edits first"); return; }
   const parentId = state.session.selected_node_id;
   try {
     const r = await post(`/api/session/${encodeURIComponent(state.video)}/node/model`,
-                         { parent_id: parentId, prompt });
-    state.job = { id: r.job_id, parentId, prompt, video: state.video };
-    els.btnRun.disabled = true;
+                         { parent_id: parentId, prompt, mode });
+    state.job = { id: r.job_id, parentId,
+                  prompt: mode === "track" ? "track all fish" : prompt,
+                  video: state.video };
+    updateRunButtons();
     els.jobStatus.className = "job-status";
     els.jobStatus.textContent = `⏳ running model (job ${r.job_id})… the UI stays usable`;
     renderTree();
@@ -986,7 +1109,7 @@ async function pollJob() {
   if (j.status === "running") { setTimeout(pollJob, 2000); return; }
   const jobVideo = state.job.video;
   state.job = null;
-  els.btnRun.disabled = false;
+  updateRunButtons();
   if (j.status === "done") {
     els.jobStatus.className = "job-status";
     els.jobStatus.textContent = `✓ new step #${j.node.id}`;

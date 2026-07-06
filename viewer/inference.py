@@ -77,6 +77,37 @@ def build_correction_chat(session, parent_tracks, correction_prompt,
     )
 
 
+def build_track_chat(session, max_frames=None, frame_sample_mode=None,
+                     max_fps=MAX_FPS):
+    """Build the single-turn chat for INITIAL tracking (no prior step).
+
+    points=[] is deliberate: the formatter's empty-points branch
+    (data_formatter.py:1446) ignores `question` and substitutes the keyword
+    template prompt — exactly what the cfc_track_eval pipeline produces, so
+    this matches the training/eval distribution byte-for-byte (deterministic
+    via Random(0) in build_multi_turn_chat; oracle-verified against the
+    `input` field of a cfc_track_eval predictions.json).
+    """
+    turn0 = dict(
+        width=session["width"],
+        height=session["height"],
+        label=session.get("expression", "fish"),
+        sampling_fps=session["sampling_fps"],
+        style="video_point_track_per_frame",
+        question=session.get("root_prompt", track_io.DEFAULT_ROOT_PROMPT),
+        points=[],
+    )
+    raw = {"multi_turn_messages": [turn0]}
+    return rv.build_multi_turn_chat(
+        raw,
+        video_path=session["video_path"],
+        max_frames=max_frames,
+        frame_sample_mode=frame_sample_mode,
+        max_fps=max_fps,
+        sampling_fps=session["sampling_fps"],
+    )
+
+
 class ModelRunner:
     """Owns the vLLM LLM + processor. load() is safe to call from a background
     thread; failures (e.g. CUDA OOM) are captured into status() instead of
@@ -143,6 +174,23 @@ class ModelRunner:
             frame_sample_mode=vp.frame_sample_mode,
             max_fps=self.max_fps,
         )
+        return self._generate_tracks(session, messages)
+
+    def run_tracking(self, session):
+        """Initial 'track all fish' step (no prior tracks in context).
+        Returns (raw_output_text, tracks)."""
+        if self._state != "ready":
+            raise RuntimeError(f"model not ready ({self._state}: {self._error})")
+        vp = self.processor.video_processor
+        messages = build_track_chat(
+            session,
+            max_frames=vp.num_frames,
+            frame_sample_mode=vp.frame_sample_mode,
+            max_fps=self.max_fps,
+        )
+        return self._generate_tracks(session, messages)
+
+    def _generate_tracks(self, session, messages):
         images, videos_inputs, video_kwargs = process_vision_info(messages)
         prompt = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True)
