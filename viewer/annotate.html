@@ -242,6 +242,7 @@ const state = {
   job: null,           // {id, parentId, prompt, video}
   modelState: "not_loaded",  // /api/model/status .state (drives run buttons)
   srcVideos: null,     // Set of videos in the inspected predictions file (filters the pick list)
+  srcExist: null,      // subset of srcVideos with an mp4 on disk (server-checked)
   imgCache: new Map(),
   view: { zoom: 1, panX: 0, panY: 0 },  // canvas backing-store space
   panDrag: null,       // {bx, by, panX, panY} while pan-dragging
@@ -368,7 +369,7 @@ function bindSetup() {
   els.vidFilter.addEventListener("input", debounce(refreshBrowse, 250));
   // editing the source path invalidates the current video filter until re-inspect
   els.srcPath.addEventListener("input", debounce(() => {
-    if (state.srcVideos) { state.srcVideos = null; refreshBrowse(); }
+    if (state.srcVideos) { state.srcVideos = state.srcExist = null; refreshBrowse(); }
   }, 400));
   els.modelPath.value = state.config.model_dir || state.config.default_model_dir || "";
   $("btn-model-browse").onclick = () => browseFs(
@@ -378,7 +379,7 @@ function bindSetup() {
   els.noPreds.onchange = () => {
     const off = els.noPreds.checked;
     els.srcPath.disabled = $("btn-browse").disabled = $("btn-inspect").disabled = off;
-    if (off) { state.srcVideos = null; els.trajPick.style.display = "none";
+    if (off) { state.srcVideos = state.srcExist = null; els.trajPick.style.display = "none";
                els.inspectResult.textContent = ""; refreshBrowse(); }
   };
   $("btn-browse").onclick = () => browseFs(
@@ -423,12 +424,18 @@ async function refreshBrowse() {
       els.vidPickHint.textContent = "Video directory not listable — paste exact names below.";
       return;
     }
-    // with a predictions source inspected, only offer the videos it contains
+    // with a predictions source inspected, only offer the videos it contains —
+    // built from the server-side existence check (srcExist), NOT from r.videos,
+    // which is truncated to the first N of the directory listing
     let videos = r.videos;
     let filterNote = "";
-    if (state.srcVideos) {
-      videos = videos.filter(v => state.srcVideos.has(v));
-      const missing = [...state.srcVideos].filter(v => !r.videos.includes(v));
+    let truncated = r.truncated;
+    if (state.srcVideos && state.srcExist) {
+      videos = [...state.srcExist].sort();
+      const ql = q.toLowerCase();
+      if (ql) videos = videos.filter(v => v.toLowerCase().includes(ql));
+      truncated = false;
+      const missing = [...state.srcVideos].filter(v => !state.srcExist.has(v));
       filterNote = ` · filtered to the ${state.srcVideos.size} video(s) in the predictions file`;
       if (missing.length && !q) filterNote += ` (${missing.length} of them have no mp4 on disk: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""})`;
     }
@@ -443,7 +450,7 @@ async function refreshBrowse() {
       it.appendChild(document.createTextNode(" " + v));
       els.vidPick.appendChild(it);
     }
-    els.vidPickHint.textContent = (r.truncated ? `showing first ${videos.length} — narrow the filter` : `${videos.length} match(es)`) + filterNote;
+    els.vidPickHint.textContent = (truncated ? `showing first ${videos.length} — narrow the filter` : `${videos.length} match(es)`) + filterNote;
   } catch (e) {
     els.vidPickHint.textContent = `listing failed (${e.message}) — paste exact names below.`;
   }
@@ -504,6 +511,8 @@ async function inspectSource() {
     if (r.error) { els.inspectResult.innerHTML = `<span style="color:#fca5a5">✗ ${escapeHtml(r.error)}</span>`; return; }
     els.inspectResult.textContent = `✓ ${r.kind} — ${r.videos.length} video(s)`;
     state.srcVideos = new Set(r.videos);
+    const chk = await post("/api/videos/check", { videos: r.videos });
+    state.srcExist = new Set(chk.exist);
     refreshBrowse();
     // trajectory dropdown only when some video has >1 trajectory
     const byVideo = {};

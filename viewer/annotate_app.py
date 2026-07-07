@@ -133,6 +133,20 @@ def browse_videos(q: str = "", limit: int = 500):
     return {"videos": names, "truncated": truncated, "listing_ok": True}
 
 
+class CheckVideosPayload(BaseModel):
+    videos: list[str]
+
+
+@app.post("/api/videos/check")
+def check_videos(payload: CheckVideosPayload):
+    """Which of these video basenames have an mp4 on disk. Used by the setup
+    page to filter the pick list to a predictions file's videos — a direct
+    existence check, NOT the (truncated) directory listing above."""
+    vdir = _videos_dir()
+    exist = [v for v in payload.videos if (vdir / f"{v}.mp4").is_file()]
+    return {"exist": exist}
+
+
 @app.get("/api/browse/fs")
 def browse_fs(path: str = ".", q: str = ""):
     """Directory listing for the source-file picker (json/jsonl only)."""
