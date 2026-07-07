@@ -34,6 +34,7 @@ input[type=text]:focus, textarea:focus { outline: none; border-color: #3b82f6; }
 .vid-item:hover { background: #2a2a2a; }
 .vid-item.active { background: #1e3a5f; color: #fff; }
 .vid-item .n { color: #888; font-size: 11px; flex-shrink: 0; }
+.vid-item .tag { color: #8ab4f8; font-size: 10px; background: #1a2a3a; border-radius: 3px; padding: 0 4px; }
 
 .tree-header { padding: 8px 12px 4px; font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
 .tree-wrap { flex: 1; overflow: auto; padding: 6px 10px 20px; }
@@ -167,8 +168,14 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
       </div>
       <div class="card">
         <h3>4 · Confirm</h3>
+        <div class="fs-row">
+          <input type="text" id="session-tag" placeholder="Session tag (optional) — e.g. checkpoint name">
+        </div>
+        <div class="hint">The tag lets the same video have several parallel sessions (e.g. one per model
+          checkpoint for side-by-side comparison). Prefilled from the loaded checkpoint; clear it for the
+          plain untagged session.</div>
         <div class="hint">Frames and metadata are only read after you confirm. Existing sessions for the
-          same videos are resumed (tick the box to reinitialize from the source instead).</div>
+          same videos <em>and tag</em> are resumed (tick the box to reinitialize from the source instead).</div>
         <label class="toggle" style="font-size:12px"><input type="checkbox" id="force-reinit"> Reinitialize (discard existing session trees for these videos)</label>
         <div><button class="primary" id="btn-load">Confirm &amp; Load</button></div>
         <div class="load-results" id="load-results"></div>
@@ -231,15 +238,15 @@ details.raw pre { white-space: pre-wrap; word-break: break-all; max-height: 140p
 /* ================= state ================= */
 const state = {
   config: null,
-  sessions: [],        // /api/videos summaries
-  video: null,         // current video id
+  sessions: [],        // /api/videos summaries (one per session, not per video)
+  sid: null,           // current session id ({video}__{tag}, or video when untagged)
   session: null,       // full session dict (+available_frames)
   frameList: [],
   cursor: 0,
   hidden: new Set(),   // hidden track ids (display only)
   activeTrack: null,   // chip-selected track id (edit target)
   edit: null,          // {parentId, base, tracks, mode, drag}
-  job: null,           // {id, parentId, prompt, video}
+  job: null,           // {id, parentId, prompt, sid}
   modelState: "not_loaded",  // /api/model/status .state (drives run buttons)
   srcVideos: null,     // Set of videos in the inspected predictions file (filters the pick list)
   srcExist: null,      // subset of srcVideos with an mp4 on disk (server-checked)
@@ -262,6 +269,7 @@ const els = {
   srcPath: $("src-path"), fsList: $("fs-list"), inspectResult: $("inspect-result"),
   trajPick: $("traj-pick"), trajSelect: $("traj-select"),
   forceReinit: $("force-reinit"), loadResults: $("load-results"),
+  sessionTag: $("session-tag"),
   tbVideo: $("tb-video"), tbMeta: $("tb-meta"),
   canvas: $("canvas"), frameInfo: $("frame-info"), editBanner: $("edit-banner"),
   prev: $("prev"), next: $("next"), slider: $("slider"),
@@ -412,6 +420,24 @@ function renderModelCard(s) {
   else if (s.state === "loading") els.modelLoadStatus.textContent = `⏳ loading ${s.model_dir}… (a few minutes; UI stays usable)`;
   else if (s.state === "error") els.modelLoadStatus.innerHTML =
     `<span style="color:#fca5a5">✗ load failed: ${escapeHtml(s.error || "see server log")} — restart the server to retry</span>`;
+  if (s.model_dir) prefillSessionTag(s.model_dir);
+}
+
+// Default session tag from a checkpoint path: basename, prefixed with the run
+// dir when the basename is a bare step name (two runs can both have a
+// "step300-hf"). Only overwrites the input while it still holds an auto value.
+function tagFromModelPath(p) {
+  const parts = p.split("/").filter(Boolean);
+  if (!parts.length) return "";
+  const base = parts[parts.length - 1];
+  return (/^step/i.test(base) && parts.length > 1)
+    ? `${parts[parts.length - 2]}_${base}` : base;
+}
+function prefillSessionTag(modelDir) {
+  const t = els.sessionTag;
+  // overwrite only the auto value — a user edit (including clearing it) sticks
+  if (t.dataset.auto !== undefined && t.value !== t.dataset.auto) return;
+  t.value = t.dataset.auto = tagFromModelPath(modelDir);
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
@@ -540,17 +566,19 @@ async function confirmLoad() {
   if (!noPreds && !source_path) {
     toast("pick a predictions source file (or tick “Start without predictions”)"); return;
   }
-  const body = { videos, source_path, force_reinit: els.forceReinit.checked };
+  const body = { videos, source_path, force_reinit: els.forceReinit.checked,
+                 tag: els.sessionTag.value.trim() };
   if (!noPreds && els.trajPick.style.display !== "none") body.trajectory_id = parseInt(els.trajSelect.value, 10);
   els.loadResults.textContent = "loading… (first touch of frames/metadata)";
   try {
     const r = await post("/api/load", body);
-    els.loadResults.innerHTML = r.sessions.map(s =>
-      s.ok ? `<div class="ok">✓ ${escapeHtml(s.video)} — ${s.n_nodes} node(s)${s.resumed ? " (resumed)" : ""}</div>`
-           : `<div class="err">✗ ${escapeHtml(s.video)} — ${escapeHtml(s.error)}</div>`).join("");
+    els.loadResults.innerHTML = r.sessions.map(s => {
+      const name = s.video + (s.tag ? ` [${s.tag}]` : "");
+      return s.ok ? `<div class="ok">✓ ${escapeHtml(name)} — ${s.n_nodes} node(s)${s.resumed ? " (resumed)" : ""}</div>`
+                  : `<div class="err">✗ ${escapeHtml(name)} — ${escapeHtml(s.error)}</div>`; }).join("");
     await refreshSessions();
     const first = r.sessions.find(s => s.ok);
-    if (first) await openVideo(first.video);
+    if (first) await openSession(first.sid);
   } catch (e) { els.loadResults.innerHTML = `<div class="err">✗ ${escapeHtml(e.message)}</div>`; }
 }
 
@@ -559,19 +587,20 @@ function renderVideoList() {
   els.videoList.innerHTML = "";
   for (const v of state.sessions) {
     const it = document.createElement("div");
-    it.className = "vid-item" + (v.video === state.video ? " active" : "");
-    it.innerHTML = `<span class="name">${escapeHtml(v.video)}</span><span class="n">${v.n_nodes}⛁</span>`;
-    it.onclick = () => openVideo(v.video);
+    it.className = "vid-item" + (v.sid === state.sid ? " active" : "");
+    const tag = v.tag ? ` <span class="tag">${escapeHtml(v.tag)}</span>` : "";
+    it.innerHTML = `<span class="name">${escapeHtml(v.video)}${tag}</span><span class="n">${v.n_nodes}⛁</span>`;
+    it.onclick = () => openSession(v.sid);
     els.videoList.appendChild(it);
   }
 }
 
-async function openVideo(video) {
+async function openSession(sid) {
   if (state.edit && !confirm("Discard unsaved point edits?")) return;
   cancelEdit(true);
   state.view = { zoom: 1, panX: 0, panY: 0 };
-  state.video = video;
-  state.session = await api(`/api/session/${encodeURIComponent(video)}`);
+  state.sid = sid;
+  state.session = await api(`/api/session/${encodeURIComponent(sid)}`);
   state.hidden = new Set();
   state.activeTrack = null;
   renderVideoList();
@@ -598,11 +627,12 @@ function renderAll() {
 
 function renderTopbar() {
   const s = state.session;
-  els.tbVideo.textContent = s.video;
+  const label = s.video + (s.tag ? ` · ${s.tag}` : "");
+  els.tbVideo.textContent = label;
   const n = selectedNode();
   const npts = n ? Object.values(n.tracks).reduce((a, t) => a + Object.keys(t).length, 0) : 0;
   els.tbMeta.textContent = `${s.width}×${s.height} · fps=${s.video_fps} · node ${s.selected_node_id} (${n ? n.kind : "?"}): ${Object.keys(n ? n.tracks : {}).length} tracks / ${npts} pts`;
-  els.treeVideo.textContent = "— " + s.video;
+  els.treeVideo.textContent = "— " + label;
 }
 
 function renderTree() {
@@ -639,7 +669,7 @@ function renderTree() {
     }
     wrap.appendChild(box);
     const kids = children[nid] || [];
-    const ghosts = (state.job && state.job.video === s.video && state.job.parentId === nid) ? [state.job] : [];
+    const ghosts = (state.job && state.job.sid === state.sid && state.job.parentId === nid) ? [state.job] : [];
     if (kids.length || ghosts.length) {
       const cw = document.createElement("div");
       cw.className = "tree-children";
@@ -662,7 +692,7 @@ async function selectNode(nid) {
   cancelEdit(true);
   if (nid === state.session.selected_node_id) { renderAll(); return; }
   try {
-    await post(`/api/session/${encodeURIComponent(state.video)}/select`, { node_id: nid });
+    await post(`/api/session/${encodeURIComponent(state.sid)}/select`, { node_id: nid });
     state.session.selected_node_id = nid;
     renderAll();
   } catch (e) { toast(`select failed: ${e.message}`); }
@@ -672,7 +702,7 @@ async function deleteNode(nid) {
   const n = state.session.nodes[nid];
   if (!confirm(`Delete step #${nid} ("${n.prompt.slice(0, 60)}") and ALL steps after it?`)) return;
   try {
-    const r = await api(`/api/session/${encodeURIComponent(state.video)}/node/${nid}`, { method: "DELETE" });
+    const r = await api(`/api/session/${encodeURIComponent(state.sid)}/node/${nid}`, { method: "DELETE" });
     for (const d of r.deleted_ids) delete state.session.nodes[d];
     state.session.selected_node_id = r.selected_node_id;
     await refreshSessions();
@@ -1056,7 +1086,7 @@ function updateCounts() {
 async function saveEdit() {
   const c = diffCounts();
   try {
-    const r = await post(`/api/session/${encodeURIComponent(state.video)}/node/manual`, {
+    const r = await post(`/api/session/${encodeURIComponent(state.sid)}/node/manual`, {
       parent_id: state.edit.parentId, tracks: state.edit.tracks, counts: c });
     state.session.nodes[r.node.id] = r.node;
     state.session.selected_node_id = r.node.id;
@@ -1094,11 +1124,11 @@ async function startModelJob(mode, prompt) {
   if (state.edit) { toast("save or cancel your point edits first"); return; }
   const parentId = state.session.selected_node_id;
   try {
-    const r = await post(`/api/session/${encodeURIComponent(state.video)}/node/model`,
+    const r = await post(`/api/session/${encodeURIComponent(state.sid)}/node/model`,
                          { parent_id: parentId, prompt, mode });
     state.job = { id: r.job_id, parentId,
                   prompt: mode === "track" ? "track all fish" : prompt,
-                  video: state.video };
+                  sid: state.sid };
     updateRunButtons();
     els.jobStatus.className = "job-status";
     els.jobStatus.textContent = `⏳ running model (job ${r.job_id})… the UI stays usable`;
@@ -1116,7 +1146,7 @@ async function pollJob() {
   try { j = await api(`/api/jobs/${state.job.id}`); }
   catch (e) { setTimeout(pollJob, 4000); return; }
   if (j.status === "running") { setTimeout(pollJob, 2000); return; }
-  const jobVideo = state.job.video;
+  const jobSid = state.job.sid;
   state.job = null;
   updateRunButtons();
   if (j.status === "done") {
@@ -1127,8 +1157,8 @@ async function pollJob() {
       els.rawDetails.style.display = "block";
       els.rawPre.textContent = j.node.model_raw_output;
     }
-    if (state.video === jobVideo) {
-      state.session = await api(`/api/session/${encodeURIComponent(jobVideo)}`);
+    if (state.sid === jobSid) {
+      state.session = await api(`/api/session/${encodeURIComponent(jobSid)}`);
       renderAll();
     }
     await refreshSessions();
@@ -1143,7 +1173,7 @@ async function pollJob() {
 async function doExport() {
   if (!state.session) return;
   try {
-    const r = await post(`/api/session/${encodeURIComponent(state.video)}/export`,
+    const r = await post(`/api/session/${encodeURIComponent(state.sid)}/export`,
                          { leaf_node_id: state.session.selected_node_id });
     toast(`exported ${r.n_steps} step(s) → ${r.path}`, 8000);
   } catch (e) { toast(`export failed: ${e.message}`); }

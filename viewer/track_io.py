@@ -18,10 +18,14 @@ Coordinate & time conventions (single source of truth)
   [x + w/2, y + h/2]. On export we write a fixed-size box centered on each
   point so the centroid round-trips exactly through the existing loaders.
 
-Session file schema (one JSON per video under --session_dir)
--------------------------------------------------------------
+Session file schema (one JSON per session under --session_dir)
+---------------------------------------------------------------
+A video can have several parallel sessions distinguished by an optional "tag"
+(e.g. one per model checkpoint, for side-by-side comparison). The session id
+(= filename stem) is "{video}__{tag}", or just "{video}" when untagged —
+legacy untagged files keep working unchanged.
 {
-  "version": 1, "video": ..., "video_path": ...,
+  "version": 1, "video": ..., "tag": "", "video_path": ...,
   "width": int, "height": int, "n_frames": int,
   "video_fps": float, "sampling_fps": float, "expression": "fish",
   "source": {"kind": "predictions|coco|trajectory_jsonl", "path": ..., "trajectory_id": ...},
@@ -514,7 +518,18 @@ def _max_int_track_id(tracks):
     return best
 
 
-def build_session(video, video_path, meta, source, steps):
+def sanitize_tag(tag):
+    """Filesystem-safe session tag ([\\w.-] only); '' when empty/None."""
+    return re.sub(r"[^\w.-]+", "-", (tag or "").strip()).strip("-")
+
+
+def session_id(video, tag):
+    """Session id = filename stem. Untagged sessions keep the legacy name."""
+    tag = sanitize_tag(tag)
+    return f"{video}__{tag}" if tag else video
+
+
+def build_session(video, video_path, meta, source, steps, tag=""):
     """New session dict from a loaded step chain (steps[0] = root)."""
     now = datetime.now().isoformat(timespec="seconds")
     nodes, parent_id = {}, None
@@ -535,6 +550,7 @@ def build_session(video, video_path, meta, source, steps):
     return {
         "version": 1,
         "video": video,
+        "tag": sanitize_tag(tag),
         "video_path": str(video_path),
         "width": meta["width"],
         "height": meta["height"],
@@ -630,7 +646,8 @@ def load_session(path):
 
 
 def list_sessions(session_dir):
-    """[{video, path, n_nodes, selected_node_id}] for every session on disk."""
+    """[{sid, video, tag, path, n_nodes, selected_node_id}] for every session
+    on disk. sid = filename stem (authoritative; legacy files = video name)."""
     out = []
     sdir = Path(session_dir)
     if not sdir.is_dir():
@@ -638,7 +655,8 @@ def list_sessions(session_dir):
     for jf in sorted(sdir.glob("*.json")):
         try:
             s = load_session(jf)
-            out.append({"video": s["video"], "path": str(jf),
+            out.append({"sid": jf.stem, "video": s["video"],
+                        "tag": s.get("tag") or "", "path": str(jf),
                         "n_nodes": len(s["nodes"]),
                         "selected_node_id": s.get("selected_node_id")})
         except (json.JSONDecodeError, KeyError, OSError):

@@ -2,8 +2,10 @@
 
 Load CFC videos + initial track predictions, then iteratively refine tracks by
 manual point edits or by prompting the trained Molmo2 correction model (vLLM).
-Each refinement is a node in a branching tree per video; sessions autosave to
---session_dir after every mutation and survive restarts.
+Each refinement is a node in a branching tree per session; sessions autosave to
+--session_dir after every mutation and survive restarts. A video can have
+several parallel sessions distinguished by a tag (e.g. one per checkpoint when
+comparing models across two app instances sharing the session dir).
 
 Usage:
     python viewer/annotate_app.py
@@ -48,8 +50,8 @@ class State:
     default_model_dir: str = DEFAULT_MODEL_DIR   # prefilled in the UI
     model_dir: str | None = None                 # set once /api/model/load runs
     export_box_size: float = 20.0
-    sessions: dict = {}          # video -> session dict (mirrors disk)
-    jobs: dict = {}              # job_id -> {status, video, parent_id, prompt, node?, error?}
+    sessions: dict = {}          # sid -> session dict (mirrors disk)
+    jobs: dict = {}              # job_id -> {status, sid, parent_id, prompt, node?, error?}
     runner = None                # inference.ModelRunner | None
     _frames_cache: dict = {}
     _lock = threading.Lock()     # guards sessions + jobs mutations
@@ -69,21 +71,21 @@ def _list_frames(video: str) -> list[int]:
     return State._frames_cache[video]
 
 
-def _get_session(video: str) -> dict:
-    s = State.sessions.get(video)
+def _get_session(sid: str) -> dict:
+    s = State.sessions.get(sid)
     if s is None:
-        p = track_io.session_path(State.session_dir, video)
+        p = track_io.session_path(State.session_dir, sid)
         if p.exists():
             s = track_io.load_session(p)
-            State.sessions[video] = s
+            State.sessions[sid] = s
     if s is None:
-        raise HTTPException(404, f"no session for video {video!r}; load it first")
+        raise HTTPException(404, f"no session {sid!r}; load it first")
     return s
 
 
 def _save(session: dict):
-    track_io.save_session(session,
-                          track_io.session_path(State.session_dir, session["video"]))
+    sid = track_io.session_id(session["video"], session.get("tag"))
+    track_io.save_session(session, track_io.session_path(State.session_dir, sid))
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +197,7 @@ class LoadPayload(BaseModel):
     source_path: str | None = None   # None/empty = start from an empty root
     trajectory_id: int | None = None
     force_reinit: bool = False
+    tag: str = ""                    # distinguishes parallel sessions per video
 
 
 @app.post("/api/load")
@@ -206,16 +209,19 @@ def load_videos(payload: LoadPayload):
         kind, err = track_io.detect_source(source_path)
     else:
         kind, err = "none", None
+    tag = track_io.sanitize_tag(payload.tag)
     results = []
     for video in payload.videos:
         video = video.strip().removesuffix(".mp4")
         video = Path(video).name if "/" in video else video
+        sid = track_io.session_id(video, tag)
         try:
-            sp = track_io.session_path(State.session_dir, video)
+            sp = track_io.session_path(State.session_dir, sid)
             if sp.exists() and not payload.force_reinit:
-                State.sessions[video] = track_io.load_session(sp)
-                results.append({"video": video, "ok": True, "resumed": True,
-                                "n_nodes": len(State.sessions[video]["nodes"])})
+                State.sessions[sid] = track_io.load_session(sp)
+                results.append({"sid": sid, "video": video, "tag": tag,
+                                "ok": True, "resumed": True,
+                                "n_nodes": len(State.sessions[sid]["nodes"])})
                 continue
             if err:
                 raise ValueError(f"bad source file: {err}")
@@ -244,35 +250,39 @@ def load_videos(payload: LoadPayload):
                 video, _videos_dir() / f"{video}.mp4", meta,
                 {"kind": kind, "path": source_path,
                  "trajectory_id": payload.trajectory_id},
-                steps)
+                steps, tag=tag)
             with State._lock:
-                State.sessions[video] = session
+                State.sessions[sid] = session
                 _save(session)
-            results.append({"video": video, "ok": True, "resumed": False,
+            results.append({"sid": sid, "video": video, "tag": tag,
+                            "ok": True, "resumed": False,
                             "n_nodes": len(session["nodes"])})
         except (ValueError, OSError) as e:
-            results.append({"video": video, "ok": False, "error": str(e)})
+            results.append({"sid": sid, "video": video, "tag": tag,
+                            "ok": False, "error": str(e)})
     return {"sessions": results}
 
 
 @app.get("/api/videos")
 def list_videos():
-    """Loaded + on-disk sessions."""
+    """Loaded + on-disk sessions (one entry per session, not per video)."""
     seen = {}
     for s in track_io.list_sessions(State.session_dir):
-        seen[s["video"]] = {"video": s["video"], "n_nodes": s["n_nodes"],
-                            "selected_node_id": s["selected_node_id"],
-                            "loaded": s["video"] in State.sessions}
-    for v, s in State.sessions.items():
-        seen[v] = {"video": v, "n_nodes": len(s["nodes"]),
-                   "selected_node_id": s["selected_node_id"], "loaded": True}
-    return sorted(seen.values(), key=lambda x: x["video"])
+        seen[s["sid"]] = {"sid": s["sid"], "video": s["video"], "tag": s["tag"],
+                          "n_nodes": s["n_nodes"],
+                          "selected_node_id": s["selected_node_id"],
+                          "loaded": s["sid"] in State.sessions}
+    for sid, s in State.sessions.items():
+        seen[sid] = {"sid": sid, "video": s["video"], "tag": s.get("tag") or "",
+                     "n_nodes": len(s["nodes"]),
+                     "selected_node_id": s["selected_node_id"], "loaded": True}
+    return sorted(seen.values(), key=lambda x: (x["video"], x["tag"]))
 
 
-@app.get("/api/session/{video}")
-def get_session(video: str):
-    s = _get_session(video)
-    return dict(s, available_frames=_list_frames(video))
+@app.get("/api/session/{sid}")
+def get_session(sid: str):
+    s = _get_session(sid)
+    return dict(s, available_frames=_list_frames(s["video"]))
 
 
 @app.get("/api/frame/{video}/{frame_idx}")
@@ -291,9 +301,9 @@ class SelectPayload(BaseModel):
     node_id: str
 
 
-@app.post("/api/session/{video}/select")
-def select_node(video: str, payload: SelectPayload):
-    s = _get_session(video)
+@app.post("/api/session/{sid}/select")
+def select_node(sid: str, payload: SelectPayload):
+    s = _get_session(sid)
     if payload.node_id not in s["nodes"]:
         raise HTTPException(400, f"unknown node {payload.node_id!r}")
     with State._lock:
@@ -308,9 +318,9 @@ class ManualPayload(BaseModel):
     counts: dict = {}
 
 
-@app.post("/api/session/{video}/node/manual")
-def add_manual_node(video: str, payload: ManualPayload):
-    s = _get_session(video)
+@app.post("/api/session/{sid}/node/manual")
+def add_manual_node(sid: str, payload: ManualPayload):
+    s = _get_session(sid)
     c = payload.counts
     prompt = (f"User added {c.get('added', 0)} points, "
               f"deleted {c.get('deleted', 0)} points, "
@@ -325,9 +335,9 @@ def add_manual_node(video: str, payload: ManualPayload):
     return {"node": node}
 
 
-@app.delete("/api/session/{video}/node/{node_id}")
-def delete_node(video: str, node_id: str):
-    s = _get_session(video)
+@app.delete("/api/session/{sid}/node/{node_id}")
+def delete_node(sid: str, node_id: str):
+    s = _get_session(sid)
     with State._lock:
         try:
             deleted = track_io.delete_subtree(s, node_id)
@@ -348,15 +358,15 @@ class ModelPayload(BaseModel):
     mode: str = "correction"    # "correction" | "track" (initial tracking)
 
 
-@app.post("/api/session/{video}/node/model")
-def add_model_node(video: str, payload: ModelPayload):
+@app.post("/api/session/{sid}/node/model")
+def add_model_node(sid: str, payload: ModelPayload):
     if State.runner is None:
         raise HTTPException(409, "no model loaded; pick a checkpoint in setup")
     status = State.runner.status()
     if status["state"] != "ready":
         raise HTTPException(409, f"model not ready: {status['state']}"
                             + (f" ({status.get('error')})" if status.get("error") else ""))
-    s = _get_session(video)
+    s = _get_session(sid)
     if payload.parent_id not in s["nodes"]:
         raise HTTPException(400, f"unknown node {payload.parent_id!r}")
     if payload.mode not in ("correction", "track"):
@@ -370,21 +380,21 @@ def add_model_node(video: str, payload: ModelPayload):
         if any(j["status"] == "running" for j in State.jobs.values()):
             raise HTTPException(409, "a model job is already running")
         job_id = uuid.uuid4().hex[:12]
-        State.jobs[job_id] = {"status": "running", "video": video,
+        State.jobs[job_id] = {"status": "running", "sid": sid,
                               "parent_id": payload.parent_id,
                               "prompt": prompt, "mode": payload.mode}
     threading.Thread(target=_run_model_job,
-                     args=(job_id, video, payload.parent_id, prompt,
+                     args=(job_id, sid, payload.parent_id, prompt,
                            payload.mode),
                      daemon=True).start()
     return {"job_id": job_id}
 
 
-def _run_model_job(job_id: str, video: str, parent_id: str, prompt: str,
+def _run_model_job(job_id: str, sid: str, parent_id: str, prompt: str,
                    mode: str = "correction"):
     job = State.jobs[job_id]
     try:
-        session = State.sessions[video]
+        session = State.sessions[sid]
         parent = session["nodes"].get(parent_id)
         if parent is None:
             raise ValueError(f"parent node {parent_id} disappeared")
@@ -480,11 +490,11 @@ class ExportPayload(BaseModel):
     output_path: str | None = None
 
 
-@app.post("/api/session/{video}/export")
-def export_session(video: str, payload: ExportPayload):
-    s = _get_session(video)
+@app.post("/api/session/{sid}/export")
+def export_session(sid: str, payload: ExportPayload):
+    s = _get_session(sid)
     out = payload.output_path or str(State.session_dir / "exports"
-                                     / f"{video}_export.jsonl")
+                                     / f"{sid}_export.jsonl")
     try:
         res = track_io.export_jsonl(s, payload.leaf_node_id, out,
                                     box_size=State.export_box_size)

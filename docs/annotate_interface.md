@@ -25,12 +25,21 @@ instead of crashing the app; reallocate with more memory and restart (sessions
 survive restarts). **One checkpoint per process**: switching checkpoints
 requires a server restart (vLLM can't reliably free GPU memory in-process).
 
+**Comparing two checkpoints on the same videos**: run two server instances
+(second one with `--port 6007`, tunnel both ports) sharing the default
+`--session_dir`, load a different checkpoint in each, and give each a distinct
+**session tag** (setup step 4 — prefilled from the checkpoint name). Each tag
+gets its own session tree per video, listed side by side in either sidebar, so
+you can toggle between the two models' trees on the same video. Don't open the
+*same* tagged session for editing in both instances at once — each keeps an
+in-memory copy and the last save wins.
+
 ## CLI
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--data_dir` | `data/video_datasets/video_track/CFC` | needs `videos/`, `JPEGImages/`, `annotations/` |
-| `--session_dir` | `viewer/annotate_sessions` | per-video tree JSONs + `exports/` |
+| `--session_dir` | `viewer/annotate_sessions` | per-session tree JSONs + `exports/` |
 | `--model_dir` | `runs/cfc_all_real_llm_connector_vit/step300-hf` | default checkpoint path prefilled in the UI (nothing loads at startup) |
 | `--export_box_size` | `20` | bbox side (px) written around each point on export |
 | `--port` / `--host` | `6006` / `0.0.0.0` | |
@@ -48,7 +57,11 @@ requires a server restart (vLLM can't reliably free GPU memory in-process).
       inference) or from manual points.
    3. **Videos** — tick from the searchable list (backed by `data_dir/videos/*.mp4`;
       if the dir is missing the list is empty and you paste exact names instead).
-   4. **Confirm & Load** — frames and metadata are only read at this point.
+   4. **Confirm & Load** — the optional **session tag** (prefilled from the
+      loaded checkpoint) lets the same video carry several parallel session
+      trees; sessions are keyed by *(video, tag)*, so resuming matches both.
+      Clear the tag for the plain untagged session (legacy session files are
+      untagged). Frames and metadata are only read at this point.
 2. **Source formats** (auto-detected):
    - `predictions.json` (vLLM eval output) — reconstructed as a 2-node chain:
      root = step0 tracks parsed from the stored `input` chat, child = the model's
@@ -85,14 +98,15 @@ requires a server restart (vLLM can't reliably free GPU memory in-process).
      markers and hit radii stay constant on screen.
 4. **Export**: with a leaf selected, `Export path → jsonl` appends the root→leaf
    chain as one standard trajectory-annotation jsonl line
-   (`{session_dir}/exports/{video}_export.jsonl`), compatible with
+   (`{session_dir}/exports/{video}__{tag}_export.jsonl`), compatible with
    `CFCMultiTurn`-style loaders: bboxes are fixed-size boxes centered on each
    point so centroids round-trip exactly; images are rebuilt with
    `id = frame_idx + 1`.
 
 ## Persistence / crash recovery
 
-Every mutation atomically rewrites `{session_dir}/{video}.json` (tmp + rename).
+Every mutation atomically rewrites `{session_dir}/{video}__{tag}.json`
+(`{video}.json` when untagged; tmp + rename).
 On restart, sessions are listed in the sidebar and `/api/load` resumes them
 (tick "Reinitialize" to rebuild from the source instead). Running model jobs do
 NOT survive a restart — the resulting node is only written on success.
