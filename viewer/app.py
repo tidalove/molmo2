@@ -48,6 +48,7 @@ CFC_DEFAULT_EXPRESSION = "fish"  # qid=0 "track all fish" prompt
 
 class State:
     predictions_path: str | None = None
+    compare_path: str | None = None
     annotations_path: str | None = None
     gt_coco_path: str | None = None
     captions_path: str | None = None
@@ -183,6 +184,18 @@ def _load():
                 p["initial_pred"] = _extract_initial_pred(p.get("input", ""))
                 p["correction_text"] = _extract_correction_text(p.get("input", ""))
 
+        # Optional comparison predictions (e.g. the no_info tier of the same eval): per example,
+        # ndh_diff = norm_delta_hota(main) - norm_delta_hota(compare). Both values are precomputed
+        # floats stored in the jsons (written natively at eval time) — no HOTA compute here.
+        if State.compare_path:
+            with open(State.compare_path) as f:
+                cmp_ndh = {c["example_id"]: c.get("norm_delta_hota") for c in json.load(f)}
+            for p in State._preds:
+                cv = cmp_ndh.get(p["example_id"])
+                pv = p.get("norm_delta_hota")
+                p["compare_norm_delta_hota"] = cv
+                p["ndh_diff"] = (pv - cv) if (pv is not None and cv is not None) else None
+
         by_video = defaultdict(list)
         by_id = {}
         for p in State._preds:
@@ -264,9 +277,19 @@ def _resolve_qid(p: dict) -> int | None:
 
 
 def _load_masks(p: dict):
-    """Load MasksRLE/{video}/{qid}.json; return raw dict or None if missing."""
+    """Load MasksRLE/{video}/{qid}.json; return raw dict or None if missing.
+
+    Correction-style examples (example_id contains `_traj`) have per-trajectory GT
+    keyed by the full example_id (MasksRLE/{example_id}/0.json), not the raw video
+    name. The raw-video mask only coincides for hardlinked families; for encoded GT
+    (e.g. synthetic_incomplete, step-1) it is a different mask — so always key these
+    by example_id.
+    """
     ex_id = p["example_id"]
     if ex_id in State._masks_cache:
+        return State._masks_cache[ex_id]
+    if "_traj" in ex_id:
+        State._masks_cache[ex_id] = _render.load_masks_for(State.data_dir, ex_id, 0)
         return State._masks_cache[ex_id]
     if "__" in ex_id:
         video, _ = ex_id.rsplit("__", 1)
@@ -341,14 +364,24 @@ def list_predictions():
                 "example_id": p["example_id"],
                 "expression": p.get("expression", ""),
                 "correction_text": p.get("correction_text", "") or "",
+                "norm_delta_hota": p.get("norm_delta_hota"),
+                "ndh_diff": p.get("ndh_diff"),
             })
         n_fish = _n_fish_from_gt(video) if State.gt_only else len(_unique_obj_ids(preds))
+        # Per-video normalized ΔHOTA: mean of per-trajectory values (excluding n/a, i.e. before==1
+        # or unannotated). None -> sorts to the bottom in the viewer. Cheap arithmetic on stored
+        # floats; HOTA itself is precomputed during the post-eval plot step, never here.
+        ndh_vals = [p["norm_delta_hota"] for p in preds
+                    if p.get("norm_delta_hota") is not None]
+        diff_vals = [p["ndh_diff"] for p in preds if p.get("ndh_diff") is not None]
         out.append({
             "video": video,
             "items": items,
             "n_prompts": len(items),
             "n_fish": n_fish,
             "n_frames": len(_list_video_frames(video)),
+            "norm_delta_hota": (sum(ndh_vals) / len(ndh_vals)) if ndh_vals else None,
+            "ndh_diff": (sum(diff_vals) / len(diff_vals)) if diff_vals else None,
         })
     return out
 
@@ -360,6 +393,8 @@ def get_meta():
         "gt_only": State.gt_only,
         "text_mode": State.text_mode,
         "has_captions": State._captions is not None,
+        "has_hota": any("hota_before" in p for p in (State._preds or [])),
+        "has_ndh_diff": any(p.get("ndh_diff") is not None for p in (State._preds or [])),
     }
 
 
@@ -384,6 +419,11 @@ def get_prediction(example_id: str):
         "frames_with_preds": {str(k): v for k, v in frames_with_preds.items()},
         "available_frames": available_frames,
         "caption": (State._captions or {}).get(p["video"], ""),
+        "hota_before": p.get("hota_before"),
+        "hota_after": p.get("hota_after"),
+        "norm_delta_hota": p.get("norm_delta_hota"),
+        "compare_norm_delta_hota": p.get("compare_norm_delta_hota"),
+        "ndh_diff": p.get("ndh_diff"),
     }
 
     masks = _load_masks(p)
@@ -436,6 +476,10 @@ def main():
     src.add_argument("--predictions", help="Path to predictions.json")
     src.add_argument("--annotations",
                      help="Path to a COCO split json (GT-only mode)")
+    parser.add_argument("--compare_predictions", default=None,
+                        help="Second predictions.json (e.g. the no_info tier of the same eval); "
+                             "enables sorting by ΔΔHOTA = norm_delta_hota(main) - norm_delta_hota(compare), "
+                             "matched by example_id")
     parser.add_argument("--queries", help="Path to a queries.json (GT-only mode)")
     parser.add_argument("--captions", default=None,
                         help="Path to a captions JSON (video_id -> {caption, rounds})")
@@ -449,6 +493,7 @@ def main():
     parser.add_argument("--port", type=int, default=6006)
     args = parser.parse_args()
     State.predictions_path = args.predictions
+    State.compare_path = args.compare_predictions
     State.annotations_path = args.annotations
     State.gt_coco_path = args.gt_coco
     State.data_dir = args.data_dir
@@ -459,6 +504,8 @@ def main():
         print(f"Annotations: {args.annotations} (GT-only mode)")
     else:
         print(f"Predictions: {args.predictions}")
+    if args.compare_predictions:
+        print(f"Compare:     {args.compare_predictions} (ΔΔHOTA sort)")
     if args.captions:
         print(f"Captions:    {args.captions}")
     print(f"Data dir:    {args.data_dir}")

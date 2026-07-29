@@ -158,6 +158,8 @@ const state = {
   gtOnly: false,
   textMode: false,
   hasCaptions: false,
+  hasHota: false,
+  hasNdhDiff: false,
   step: "prediction", // "initial" | "prediction"
 };
 
@@ -196,6 +198,20 @@ async function init() {
   state.gtOnly = !!meta.gt_only;
   state.textMode = !!meta.text_mode;
   state.hasCaptions = !!meta.has_captions;
+  state.hasHota = !!meta.has_hota;
+  if (state.hasHota) {
+    const opt = document.createElement("option");
+    opt.value = "norm_delta_hota";
+    opt.textContent = "Sort: ΔHOTA (best first)";
+    els.sort.appendChild(opt);
+  }
+  state.hasNdhDiff = !!meta.has_ndh_diff;
+  if (state.hasNdhDiff) {
+    const opt = document.createElement("option");
+    opt.value = "ndh_diff";
+    opt.textContent = "Sort: ΔΔHOTA (vs compare)";
+    els.sort.appendChild(opt);
+  }
   if (state.gtOnly) {
     els.sidebarTitle.textContent = "GT Masks";
     els.onlyPredFrames.checked = false;
@@ -220,6 +236,14 @@ function renderSidebar() {
   const groups = state.index.slice();
   if (sortKey === "name") {
     groups.sort((a, b) => a.video.localeCompare(b.video));
+  } else if (sortKey === "norm_delta_hota" || sortKey === "ndh_diff") {
+    groups.sort((a, b) => {
+      const av = a[sortKey], bv = b[sortKey];
+      if (av == null && bv == null) return a.video.localeCompare(b.video);
+      if (av == null) return 1;   // n/a always last
+      if (bv == null) return -1;
+      return bv - av || a.video.localeCompare(b.video);  // higher value first
+    });
   } else {
     groups.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0)
       || a.video.localeCompare(b.video));
@@ -237,12 +261,20 @@ function renderSidebar() {
 
     const header = document.createElement("div");
     header.className = "video-header";
+    const ndh = group.norm_delta_hota;
+    const ndhBadge = state.hasHota
+      ? ` <b>ΔH</b>${ndh == null ? "n/a" : ndh.toFixed(2)}` : "";
+    const ndhDiff = group.ndh_diff;
+    const ndhDiffBadge = state.hasNdhDiff
+      ? ` <b>ΔΔH</b>${ndhDiff == null ? "n/a" : ndhDiff.toFixed(2)}` : "";
     header.innerHTML =
       `<span class="name">${escapeHtml(group.video)}</span>` +
       `<span class="badges">` +
       `<b>P</b>${group.n_prompts ?? items.length} ` +
       `<b>F</b>${group.n_fish ?? "?"} ` +
       `<b>L</b>${group.n_frames ?? "?"}` +
+      ndhBadge +
+      ndhDiffBadge +
       `</span>`;
     header.onclick = () => groupEl.classList.toggle("open");
     groupEl.appendChild(header);
