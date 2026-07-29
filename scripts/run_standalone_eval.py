@@ -11,6 +11,7 @@ import torchmetrics
 from olmo.util import prepare_cli_environment, log_metrics_to_console
 from olmo.eval.eval_utils import get_evaluator
 from olmo.eval.evaluators import SavePredictions
+from olmo.eval.object_tracking_utils import points_from_masks
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS, sampling_f
         metadata_by_id: dict keyed by example_id (basename of the dir).
     """
     from glob import glob as _glob
-    from pycocotools import mask as mask_utils
 
     metadata_by_id = {}
     n_skipped = 0
@@ -57,25 +57,9 @@ def build_metadata_from_masks_rle(masks_dir, video_fps=CFC_VIDEO_FPS, sampling_f
                 continue
 
             height, width = sample_rle['size']
-            n_frames = len(next(iter(masks.values())))
-
-            points = []
-            for frame_idx in range(n_frames):
-                frame_points = {}
-                for mask_idx_str, frame_list in masks.items():
-                    rle = frame_list[frame_idx]
-                    if rle is None:
-                        continue
-                    bx, by, bw, bh = mask_utils.toBbox(rle).tolist()
-                    frame_points[int(mask_idx_str)] = {
-                        'point': [bx + bw / 2, by + bh / 2],
-                        'occluded': False,
-                    }
-                points.append({
-                    'frame': frame_idx,
-                    'time': frame_idx / video_fps,
-                    'points': frame_points,
-                })
+            # Derive GT points from the masks via the shared helper, so points and
+            # masks share object-slot order (same rule as the eval dataset path).
+            points = points_from_masks(masks, video_fps)
 
             entry = {
                 'example_id': example_id,

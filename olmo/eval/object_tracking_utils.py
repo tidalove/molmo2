@@ -19,6 +19,42 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def points_from_masks(masks, video_fps):
+    """Build GT track points from a per-object RLE mask dict, so the points are
+    object-slot consistent with the masks used for validation.
+
+    Each object's per-frame point is the centroid of its mask bbox (via
+    `pycocotools.mask.toBbox`); the object index is the mask dict key. This is the
+    single source of truth for "GT points derived from masks", shared by the eval
+    dataset path and the standalone eval scripts so they cannot drift.
+
+    Args:
+        masks: {mask_idx_str: [rle_or_None per frame]} (all lists same length).
+        video_fps: frames-per-second used to set each frame's `time`.
+
+    Returns:
+        [{'frame', 'time', 'points': {obj_idx: {'point': [x, y], 'occluded': False}}}],
+        one entry per frame, or [] if `masks` is empty.
+    """
+    from pycocotools import mask as mask_utils
+    if not masks:
+        return []
+    n_frames = len(next(iter(masks.values())))
+    points = []
+    for frame_idx in range(n_frames):
+        frame_points = {}
+        for mask_idx_str, frame_list in masks.items():
+            rle = frame_list[frame_idx]
+            if rle is None:
+                continue
+            bx, by, bw, bh = mask_utils.toBbox(rle).tolist()
+            frame_points[int(mask_idx_str)] = {"point": [bx + bw / 2, by + bh / 2],
+                                               "occluded": False}
+        points.append({"frame": frame_idx, "time": frame_idx / video_fps,
+                       "points": frame_points})
+    return points
+
+
 def format_time(time_value, format="seconds"):
     """
     TODO [QUESTION]: Merge with `format_timestamps` in DataFormatter?

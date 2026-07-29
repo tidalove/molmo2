@@ -365,8 +365,21 @@ if __name__ == "__main__":
         examples = [ex for ex in examples if ex["example_id"] not in done_ids]
         log.info(f"Resume: {before - len(examples)} already done, {len(examples)} remaining")
 
+    def annotate_hota_native():
+        # Persist per-example HOTA into predictions.json (before = pre-correction tracks in the
+        # prompt, after = model prediction, scored vs GT masks) so downstream tools (viewer ΔHOTA
+        # sort, plot scripts) never recompute. No-op for tasks without CFC-style GT masks.
+        if not args.task:
+            return
+        try:
+            from scripts.cfc_correction_common import annotate_native_hota
+            annotate_native_hota(output_path)
+        except Exception:
+            log.warning("native HOTA annotation failed", exc_info=True)
+
     if not examples:
         log.info("No examples to process. Done.")
+        annotate_hota_native()
         exit(0)
 
     # Process in chunks
@@ -411,6 +424,7 @@ if __name__ == "__main__":
         log.info(f"Saved {len(all_predictions)} predictions to {output_path}")
 
     log.info(f"Done. Total predictions: {len(all_predictions)}")
+    annotate_hota_native()
 
     # Run evaluation if requested
     if args.eval:

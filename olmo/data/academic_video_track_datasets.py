@@ -1076,6 +1076,8 @@ class CFC(LocalTrackingDataset):
         "all-rivers-easy": "all-rivers-easy",
         # kenai-channel held-out test river (v1.1 clip set, eval-only)
         "channel": "kenai-channel",
+        # eel held-out test river (v1.1, eval-only; G-channel bg-subtracted frames)
+        "eel": "eel",
         # v1 (chunking aug) — data lives in CFCv1/ tree
         "train-v1": "all-rivers-train-v1",
         "validation-v1": "all-rivers-val-v1",
@@ -1294,6 +1296,15 @@ class CFC(LocalTrackingDataset):
         log.info(f"[{cls.DATASET_NAME}] Precomputed GT masks ({data_split}): "
                  f"{n_encoded} new, {n_skipped} already exist, "
                  f"out of {len(images_by_video)} videos.")
+
+
+class CFCFixedPrompt(CFC):
+    """CFC track task with EXPRESSION swapped so the templated inference
+    prompt ("Track {label} in {fps} FPS.") reads "Track light gray blobs in
+    {fps} FPS." instead of "Track fish in {fps} FPS.". Same videos/annotations
+    as CFC, only the label text differs."""
+    DATASET_NAME = "cfc_track_fixed_prompt"
+    EXPRESSION = "light gray blobs"
 
 
 class CFCTargeted(CFC):
@@ -1870,19 +1881,27 @@ class CFCMultiTurn(CFC):
         r'\bframes?\s+(\d+)\s+(to|and|through|until)\s+(\d+)\b',
         re.I,
     )
-    _FRAME_RANGE_DASH_RE = re.compile(r'\bframes?\s+(\d+)\s*-\s*(\d+)\b', re.I)
+    # Dash range accepts ASCII hyphen plus en/em dash ("frames N–M").
+    _FRAME_RANGE_DASH_RE = re.compile(r'\bframes?\s+(\d+)\s*[-–—]\s*(\d+)\b', re.I)
+    # Comma list ("frames N, M, ..., and K") — needs >=1 comma so it doesn't
+    # overlap the single/range-with-"and" cases. Tried before the single regex.
+    _FRAME_LIST_RE = re.compile(
+        r'\bframes\s+\d+(?:\s*,\s*\d+)+(?:\s*,?\s*and\s+\d+)?', re.I)
     _FRAME_SINGLE_RE = re.compile(r'\bframes?\s+(\d+)\b', re.I)
 
     @classmethod
     def replace_frames_with_time(cls, text, fps):
         """Rewrite frame references as time, nearest integer second, 'Ns' format.
 
-        Handles single ('frame N', 'frames N') and range ('frames N to M',
-        'frame N and M', 'frames N-M', 'frames N through M') phrasings.
-        Surrounding prepositions (at/around/from/between) and the range
-        separator (to/and/through/until/-) are preserved; only the
-        'frame(s)' word and the numbers are rewritten to time.
+        Handles single ('frame N', 'frames N'), range ('frames N to M',
+        'frame N and M', 'frames N-M', 'frames N–M', 'frames N through M') and
+        comma-list ('frames N, M, and K') phrasings. Surrounding prepositions
+        (at/around/from/between) and the separators (to/and/through/until/-/–/,)
+        are preserved; only the 'frame(s)' word and the numbers are rewritten.
         """
+        def _secs(d):
+            return f"{round(int(d.group()) / fps)}s"
+
         def _range_sub(m):
             n = round(int(m.group(1)) / fps)
             sep = m.group(2)
@@ -1894,12 +1913,18 @@ class CFCMultiTurn(CFC):
             k = round(int(m.group(2)) / fps)
             return f"{n}s-{k}s"
 
+        def _list_sub(m):
+            # Drop the "frames" word, convert every number, keep ", "/"and" seps.
+            body = re.sub(r'^frames\s+', '', m.group(), flags=re.I)
+            return re.sub(r'\d+', _secs, body)
+
         def _single_sub(m):
             n = round(int(m.group(1)) / fps)
             return f"{n}s"
 
         text = cls._FRAME_RANGE_RE.sub(_range_sub, text)
         text = cls._FRAME_RANGE_DASH_RE.sub(_range_dash_sub, text)
+        text = cls._FRAME_LIST_RE.sub(_list_sub, text)
         text = cls._FRAME_SINGLE_RE.sub(_single_sub, text)
         return text
 
@@ -1961,6 +1986,19 @@ class CFCMultiTurn(CFC):
                     metadata['masks'] = json.load(f)
             else:
                 metadata['masks'] = {}
+
+            # Derive eval GT points from the masks so their object-slot order matches
+            # the masks used for validation. points_list[-1] (the jsonl final step) is
+            # indexed by enumerate(sorted(track_ids)), which disagrees with the
+            # full-video MasksRLE slot order whenever masks are hardlinked from a
+            # differently-ordered source (real / kenai-channel corrections) — that
+            # permutation otherwise corrupts detection/HOTA. No-op where the two already
+            # agree (e.g. synthetic). Only the eval GT (metadata.points) is rebuilt;
+            # multi_turn_messages (model input) and initial_points (step-0 start) are
+            # left untouched.
+            if metadata['masks']:
+                from olmo.eval.object_tracking_utils import points_from_masks
+                metadata['points'] = points_from_masks(metadata['masks'], video_fps)
 
         return {
             'video': video_path,
@@ -2265,41 +2303,217 @@ class CFCCorrection(CFCMultiTurn):
         "all-rivers-val-v2":   "all-rivers-val-v2",
     }
 
-class CFCCorrectionA(CFCCorrection):
-    """Vision-corrections v2: complete simulated trajectories w/ vague user prompt, including correct videos."""
-    DATASET_NAME = "cfc_correction_a"
-    ID_TAG = "_complete_a"
+class CFCCorrectionSynthetic(CFCCorrection):
+    """Synthetic (simulated) correction trajectories.
+
+    Four info-level tiers share the same underlying trajectories/GT and a single
+    ID_TAG "_synthetic", so one hardlinked MasksRLE set serves all of them (the
+    'complete' final step equals the base-video COCO GT, so GT depends only on
+    the video, not the tier):
+      full       (most info) -> CFCCorrectionSyntheticFull
+      wrong-only             -> CFCCorrectionSyntheticWrongOnly
+      vague                  -> CFCCorrectionSyntheticVague
+      no-info    (least info)-> CFCCorrectionSyntheticNoInfo
+    The base class itself is the 'full' tier. GT masks are hardlinked from the
+    base MasksRLE (scripts/hardlink_real_correction_masks.py --variant synthetic).
+    The separate CFCCorrectionSyntheticIncomplete variant is NOT part of this
+    family — its GT differs from the base video and is encoded, not hardlinked."""
+    DATASET_NAME = "cfc_synthetic_correction"
+    ID_TAG = "_synthetic"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-a.jsonl",
-        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-a.jsonl",
+        "all-rivers-train-v2": "cfc_synthetic_correction_full_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_full_val.jsonl",
     }
 
-class CFCCorrectionB(CFCCorrection):
-    """Vision-corrections v2: complete simulated trajectories w/ vague user prompt, not including correct videos."""
-    DATASET_NAME = "cfc_correction_b"
-    ID_TAG = "_complete_b"
+    @classmethod
+    def _precompute_gt_masks_for_split(cls, data_split):
+        """GT we eval against is the original COCO annotation for the video (the
+        complete final correction step equals it), not re-encoded per trajectory.
+        The masks are hardlinked beforehand; this only checks existence and warns
+        on any missing. Mirrors CFCCorrectionReal._precompute_gt_masks_for_split."""
+        split_to_file = getattr(cls, "SPLIT_TO_FILE", None)
+        if split_to_file:
+            jsonl_path = join(cls.VIDEO_HOME, "caption_annotations",
+                              split_to_file[data_split])
+        else:
+            jsonl_path = cls.CORRECTIONS_PATH
+        output_base = join(cls.VIDEO_HOME, "MasksRLE")
+        os.makedirs(output_base, exist_ok=True)
+
+        records = []
+        with open(jsonl_path) as f:
+            for line in f:
+                records.append(json.loads(line))
+
+        n_missed = n_skipped = 0
+        for rec in tqdm(records, desc=f"{cls.DATASET_NAME} MasksRLE ({data_split})"):
+            video_id = rec['video_name']
+
+            for traj in rec['trajectories']:
+                example_id = f"{video_id}{cls.ID_TAG}_traj{traj['trajectory_id']}"
+                out_dir = join(output_base, example_id)
+                out_path = join(out_dir, "0.json")
+                if exists(out_path):
+                    n_skipped += 1
+                    continue
+                else:
+                    n_missed += 1
+                os.makedirs(out_dir, exist_ok=True)
+
+        log.info(f"[{cls.DATASET_NAME}] MasksRLE ({data_split}): "
+                 f"{n_missed} missing and need to be encoded, {n_skipped} existing skipped.")
+
+class CFCCorrectionSyntheticFull(CFCCorrectionSynthetic):
+    DATASET_NAME = "cfc_synthetic_correction_full"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-b.jsonl",
-        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-b.jsonl",
+        "all-rivers-train-v2": "cfc_synthetic_correction_full_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_full_val.jsonl",
     }
 
-class CFCCorrectionIncomplete(CFCCorrection):
-    """Vision-corrections v2, incomplete-trajectory variant."""
-    DATASET_NAME = "cfc_correction_incomplete"
-    ID_TAG = "_incomplete"
+class CFCCorrectionSyntheticWrongOnly(CFCCorrectionSynthetic):
+    DATASET_NAME = "cfc_synthetic_correction_wrong_only"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "all-rivers-train-v2-vision-corrections-incomplete.jsonl",
-        "all-rivers-val-v2":   "all-rivers-val-v2-vision-corrections-incomplete.jsonl",
+        "all-rivers-train-v2": "cfc_synthetic_correction_wrong-only_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_wrong-only_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticVague(CFCCorrectionSynthetic):
+    DATASET_NAME = "cfc_synthetic_correction_vague"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_vague_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_vague_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticNoInfo(CFCCorrectionSynthetic):
+    DATASET_NAME = "cfc_synthetic_correction_no_info"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_no-info_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_no-info_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticIncomplete(CFCCorrection):
+    """Incomplete synthetic trajectories (full-info only). GT = step-1, the
+    single correction target, which differs from the base video — so MasksRLE
+    are ENCODED from step-1 via the inherited CFCMultiTurn precompute (which
+    selects the max correction step; trajectories are 2-step [0,1], so max ==
+    step 1). val only."""
+    DATASET_NAME = "cfc_synthetic_correction_incomplete"
+    ID_TAG = "_synthetic_incomplete"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_incomplete_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_incomplete_val.jsonl",
+    }
+
+
+class CFCCorrectionSyntheticIncompleteNoInfo(CFCCorrectionSyntheticIncomplete):
+    """Incomplete synthetic trajectories with the step-1 prompt forced to a fixed,
+    uninformative string ("Fix any mistakes in these tracks.") instead of the
+    per-example corruption description. Reuses parent ID_TAG/masks — example_ids
+    unchanged."""
+    DATASET_NAME = "cfc_synthetic_correction_incomplete_no_info"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_incomplete_no_info_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_incomplete_no_info_val.jsonl",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Corruption-filtered subsets of each synthetic tier. Each subclass keeps the
+# parent's ID_TAG and mask-precompute behavior (so the existing MasksRLE are
+# reused — example_ids are identical) and only points SPLIT_TO_FILE at the
+# excl/incl jsonl built by scripts/build_synthetic_corruption_subsets.py:
+#   excl -> trajectories with NONE of {split_gap, swap, near_dup}
+#   incl -> trajectories with AT LEAST ONE of {split_gap, swap, near_dup}
+# ---------------------------------------------------------------------------
+
+class CFCCorrectionSyntheticFullExcl(CFCCorrectionSyntheticFull):
+    DATASET_NAME = "cfc_synthetic_correction_full_excl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_full_excl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_full_excl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticFullIncl(CFCCorrectionSyntheticFull):
+    DATASET_NAME = "cfc_synthetic_correction_full_incl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_full_incl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_full_incl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticWrongOnlyExcl(CFCCorrectionSyntheticWrongOnly):
+    DATASET_NAME = "cfc_synthetic_correction_wrong_only_excl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_wrong-only_excl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_wrong-only_excl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticWrongOnlyIncl(CFCCorrectionSyntheticWrongOnly):
+    DATASET_NAME = "cfc_synthetic_correction_wrong_only_incl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_wrong-only_incl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_wrong-only_incl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticVagueExcl(CFCCorrectionSyntheticVague):
+    DATASET_NAME = "cfc_synthetic_correction_vague_excl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_vague_excl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_vague_excl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticVagueIncl(CFCCorrectionSyntheticVague):
+    DATASET_NAME = "cfc_synthetic_correction_vague_incl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_vague_incl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_vague_incl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticNoInfoExcl(CFCCorrectionSyntheticNoInfo):
+    DATASET_NAME = "cfc_synthetic_correction_no_info_excl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_no-info_excl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_no-info_excl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticNoInfoIncl(CFCCorrectionSyntheticNoInfo):
+    DATASET_NAME = "cfc_synthetic_correction_no_info_incl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_no-info_incl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_no-info_incl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticIncompleteExcl(CFCCorrectionSyntheticIncomplete):
+    DATASET_NAME = "cfc_synthetic_correction_incomplete_excl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_incomplete_excl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_incomplete_excl_val.jsonl",
+    }
+
+class CFCCorrectionSyntheticIncompleteIncl(CFCCorrectionSyntheticIncomplete):
+    DATASET_NAME = "cfc_synthetic_correction_incomplete_incl"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_synthetic_correction_incomplete_incl_train.jsonl",
+        "all-rivers-val-v2":   "cfc_synthetic_correction_incomplete_incl_val.jsonl",
     }
 
 
 class CFCCorrectionReal(CFCCorrection):
-    """Vision-corrections v2, real-corrections variant."""
+    """Vision-corrections v2, real-corrections variant.
+
+    Four info-level tiers share the same underlying tracks/GT and a single
+    ID_TAG "_real", so one hardlinked MasksRLE set serves all of them
+    (GT masks depend only on the video, not the tier). Each tier exists in an
+    "easy" and a "hard" flavor (-easy / -hard jsonls):
+      full       (most info) -> CFCCorrectionRealFull{Easy,Hard}
+      wrong-only             -> CFCCorrectionRealWrongOnly{Easy,Hard}
+      vague                  -> CFCCorrectionRealVague{Easy,Hard}
+      no-info    (least info)-> CFCCorrectionRealNoInfo{Easy,Hard}
+    The base class itself is the 'full easy' tier."""
     DATASET_NAME = "cfc_correction_real"
     ID_TAG = "_real"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "cfc_real_correction_c_train.jsonl",
-        "all-rivers-val-v2":   "cfc_real_correction_c_val.jsonl",
+        "all-rivers-train-v2": "cfc_real_correction_full_train-easy.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_full_val-easy.jsonl",
     }
 
     @classmethod
@@ -2342,33 +2556,85 @@ class CFCCorrectionReal(CFCCorrection):
         log.info(f"[{cls.DATASET_NAME}] MasksRLE ({data_split}): "
                  f"{n_missed} missing and need to be encoded, {n_skipped} existing skipped.")
 
-class CFCCorrectionRealB(CFCCorrectionReal):
-    DATASET_NAME = "cfc_correction_real_b"
-    ID_TAG = "_real_b"
+class CFCCorrectionRealFullEasy(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_full_easy"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "cfc_real_correction_b_train.jsonl",
-        "all-rivers-val-v2":   "cfc_real_correction_b_val.jsonl",
+        "all-rivers-train-v2": "cfc_real_correction_full_train-easy.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_full_val-easy.jsonl",
     }
 
-class CFCCorrectionRealA(CFCCorrectionReal):
-    DATASET_NAME = "cfc_correction_real_a"
-    ID_TAG = "_real_a"
+class CFCCorrectionRealWrongOnlyEasy(CFCCorrectionReal):
+    # no val-easy jsonl exists for this tier — train only
+    DATASET_NAME = "cfc_correction_real_wrong_only_easy"
     SPLIT_TO_FILE = {
-        "all-rivers-train-v2": "cfc_real_correction_a_train.jsonl",
-        "all-rivers-val-v2":   "cfc_real_correction_a_val.jsonl",
+        "all-rivers-train-v2": "cfc_real_correction_wrong-only_train-easy.jsonl",
     }
 
-class CFCCorrectionRealAYoloSort(CFCCorrectionReal):
-    """real_a variant whose step-0 (pre-correction) tracks are real YOLO-SORT
-    tracker output and step-1 (post-correction) is the COCO GT. One trajectory
-    per video, fixed correction prompt "Fix any mistakes in these tracks."
-    Built by scripts/build_cfc_real_correction_a_yolosort.py. Distinct ID_TAG so
-    its hardlinked MasksRLE / example-ids don't collide with the curated real_a."""
-    DATASET_NAME = "cfc_correction_real_a_yolosort"
-    ID_TAG = "_real_a_ys"
+class CFCCorrectionRealVagueEasy(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_vague_easy"
     SPLIT_TO_FILE = {
-        "all-rivers-val-v2": "cfc_real_correction_a_yolosort_val.jsonl",
+        "all-rivers-train-v2": "cfc_real_correction_vague_train-easy.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_vague_val-easy.jsonl",
     }
+
+class CFCCorrectionRealNoInfoEasy(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_no_info_easy"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_no-info_train-easy.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_no-info_val-easy.jsonl",
+    }
+
+class CFCCorrectionRealFullHard(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_full_hard"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_full_train-hard.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_full_val-hard.jsonl",
+    }
+
+class CFCCorrectionRealWrongOnlyHard(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_wrong_only_hard"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_wrong-only_train-hard.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_wrong-only_val-hard.jsonl",
+    }
+
+class CFCCorrectionRealVagueHard(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_vague_hard"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_vague_train-hard.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_vague_val-hard.jsonl",
+    }
+
+class CFCCorrectionRealNoInfoHard(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_no_info_hard"
+    SPLIT_TO_FILE = {
+        "all-rivers-train-v2": "cfc_real_correction_no-info_train-hard.jsonl",
+        "all-rivers-val-v2":   "cfc_real_correction_no-info_val-hard.jsonl",
+    }
+
+class CFCCorrectionRealYOLOFull(CFCCorrectionReal):
+    """Real YOLO-SORT step-0 tracks, COCO GT step-1; correction prompt at the
+    'full'-info level. The four CFCCorrectionRealYOLO* variants (full / no-info /
+    vague / wrong-only) share the same underlying tracks/GT and a common
+    ID_TAG '_yolo', so a single hardlinked MasksRLE set serves all four."""
+    DATASET_NAME = "cfc_correction_real_yolo_full"
+    ID_TAG = "_yolo"
+    SPLIT_TO_FILE = {"all-rivers-val-v2": "yolo_corrections_full.jsonl"}
+
+class CFCCorrectionRealYOLONoInfo(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_yolo_no_info"
+    ID_TAG = "_yolo"
+    SPLIT_TO_FILE = {"all-rivers-val-v2": "yolo_corrections_no-info.jsonl"}
+
+class CFCCorrectionRealYOLOVague(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_yolo_vague"
+    ID_TAG = "_yolo"
+    SPLIT_TO_FILE = {"all-rivers-val-v2": "yolo_corrections_vague.jsonl"}
+
+class CFCCorrectionRealYOLOWrongOnly(CFCCorrectionReal):
+    DATASET_NAME = "cfc_correction_real_yolo_wrong_only"
+    ID_TAG = "_yolo"
+    SPLIT_TO_FILE = {"all-rivers-val-v2": "yolo_corrections_wrong-only.jsonl"}
 
 
 class CFCCorrectionKenaiChannel(CFCCorrectionReal):
@@ -2382,6 +2648,59 @@ class CFCCorrectionKenaiChannel(CFCCorrectionReal):
     SPLIT_MAP = {"channel": "kenai-channel"}
     SPLIT_TO_FILE = {"kenai-channel": "cfc_correction_kenai_channel_val.jsonl"}
     SPLIT_TO_FPS_SOURCE = {"kenai-channel": "kenai-channel"}
+
+
+class CFCCorrectionKenaiChannelFull(CFCCorrectionKenaiChannel):
+    """Kenai-channel correction, full-info tier: only the corrected (wrong) videos,
+    step-1 prompt = that video's caption. 2-tier eval (no corrections on correct videos)."""
+    DATASET_NAME = "cfc_correction_kenai_channel_full"
+    SPLIT_TO_FILE = {"kenai-channel": "cfc_correction_kenai_channel_full_val.jsonl"}
+
+
+class CFCCorrectionKenaiChannelNoInfo(CFCCorrectionKenaiChannel):
+    """Kenai-channel correction, no-info tier: all videos (incl. og-correct), fixed
+    step-1 prompt "Fix any mistakes in these tracks." 4-tier eval."""
+    DATASET_NAME = "cfc_correction_kenai_channel_no_info"
+    SPLIT_TO_FILE = {"kenai-channel": "cfc_correction_kenai_channel_no_info_val.jsonl"}
+
+
+class CFCCorrectionEel(CFCMultiTurn):
+    """Synthetic point-corruption correction tiers on the eel held-out river
+    (eval-only). step-0 = corrupted (subsampled/deleted) eel GT; step-1 = full
+    eel GT. eel is relabeled to 2fps (every native frame kept), so VIDEO_FPS=2
+    makes _build_video_annotation emit clean 0.5s-spaced timestamps and there is
+    no x3 output downsample. GT (step-1) is identical across all three tiers, so
+    one shared ID_TAG "_eel" serves a single encoded MasksRLE set. Masks are
+    ENCODED from step-1 via the inherited CFCMultiTurn precompute (NOT inheriting
+    CFCCorrectionSynthetic, whose precompute only checks existence). Built by
+    scripts/build_eel_correction_tiers.py."""
+    DATASET_NAME = "cfc_correction_eel"
+    VIDEO_FPS = 2
+    ID_TAG = "_eel"
+    EXPRESSION = "fish"
+    SPLIT_MAP = {"eel": "eel"}
+    SPLIT_TO_FPS_SOURCE = {"eel": "eel"}
+
+
+class CFCCorrectionEelMinimum(CFCCorrectionEel):
+    """eel correction, minimum-info tier: longest ceil(n/4) fish kept with 3
+    points each (entry/exit/midpoint); rest of the fish have no points."""
+    DATASET_NAME = "cfc_correction_eel_minimum"
+    SPLIT_TO_FILE = {"eel": "cfc_correction_eel_minimum.jsonl"}
+
+
+class CFCCorrectionEelMaximum(CFCCorrectionEel):
+    """eel correction, maximum-info tier: longest ceil(n/2) fish kept, each
+    subsampled to half its points; rest of the fish have no points."""
+    DATASET_NAME = "cfc_correction_eel_maximum"
+    SPLIT_TO_FILE = {"eel": "cfc_correction_eel_maximum.jsonl"}
+
+
+class CFCCorrectionEelEven(CFCCorrectionEel):
+    """eel correction, even tier: all fish kept, each thinned to ~1/6 of its
+    points evenly (every 6th point)."""
+    DATASET_NAME = "cfc_correction_eel_even"
+    SPLIT_TO_FILE = {"eel": "cfc_correction_eel_even.jsonl"}
 
 
 class SAFARI(LocalTrackingDataset):

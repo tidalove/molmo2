@@ -2375,7 +2375,8 @@ class VideoObjectTrackingEval(Evaluator):
         return out
 
 
-CFC_RIVERS = [("kenai", "Left"), ("rightbank", "Right"), ("elwha", "Elwha"), ("nusagak", "Nusagak")]
+CFC_RIVERS = [("kenai", "Left"), ("rightbank", "Right"), ("elwha", "Elwha"),
+              ("nusagak", "Nusagak"), ("channel", "Channel")]
 
 
 def _cfc_river(name):

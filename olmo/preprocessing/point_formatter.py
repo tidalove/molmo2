@@ -393,7 +393,7 @@ class UnifiedPointFormatter(PointFormatter):
         else:
             x_scale, y_scale = scale, scale
         x, y = float(point[0])/x_scale, float(point[1])/y_scale
-        if not 0 <= x <= 1.0 and 0 <= y <= 1.0:
+        if not (0 <= x <= 1.0 and 0 <= y <= 1.0):
             logging.warning(f"Out of bound points {point}")
             x, y = (max(0, min(x, 1.0)), max(0, min(y, 1.0)))
         if self.coordinate_scale == "1000":

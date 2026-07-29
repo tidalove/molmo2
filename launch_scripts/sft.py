@@ -181,14 +181,19 @@ INDIVIDUAL_DATASETS = {
     "cfc_track_v1": "tracking",
     "cfc_track_v2": "tracking",
     "cfc_text": "tracking",
-    "cfc_correction": "tracking",
-    "cfc_correction_incomplete": "tracking",
-    "cfc_correction_real_full": "tracking",
-    "cfc_correction_real_wrong_only": "tracking",
-    "cfc_correction_real_vague": "tracking",
-    "cfc_correction_real_no_info": "tracking",
-    "cfc_correction_a": "tracking",
-    "cfc_correction_b": "tracking",
+    "cfc_synthetic_correction_full": "tracking",
+    "cfc_synthetic_correction_vague": "tracking",
+    "cfc_synthetic_correction_wrong_only": "tracking",
+    "cfc_synthetic_correction_no_info": "tracking",
+    "cfc_synthetic_correction_incomplete": "tracking",
+    "cfc_correction_real_full_easy": "tracking",
+    "cfc_correction_real_wrong_only_easy": "tracking",
+    "cfc_correction_real_vague_easy": "tracking",
+    "cfc_correction_real_no_info_easy": "tracking",
+    "cfc_correction_real_full_hard": "tracking",
+    "cfc_correction_real_wrong_only_hard": "tracking",
+    "cfc_correction_real_vague_hard": "tracking",
+    "cfc_correction_real_no_info_hard": "tracking",
 }
 
 
@@ -421,48 +426,62 @@ def get_training_mixture(name):
     elif name == "cfc_base":
         training_mixture = [
             ["cfc_track", ["cfc_track"], 0.5],
-            ["cfc_correction", ["cfc_correction"], 0.5],
+            ["cfc_target", ["cfc_target"], 0.5],
         ]
     elif name == "cfc_all_synthetic":
         training_mixture = [
             ["cfc_track", ["cfc_track"], 0.1],
             ["cfc_target", ["cfc_target"], 0.1],
-            ["cfc_text", ["cfc_text"], 0.1],
-            ["cfc_guided", ["cfc_guided"], 0.1],
-            ["cfc_correction", ["cfc_correction"], 0.3],
-            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.3],
+            ["cfc_synthetic_correction_full", ["cfc_synthetic_correction_full"], 0.25],
+            ["cfc_synthetic_correction_incomplete", ["cfc_synthetic_correction_incomplete"], 0.1],
+            ["cfc_synthetic_correction_wrong_only", ["cfc_synthetic_correction_wrong_only"], 0.15],
+            ["cfc_synthetic_correction_no_info", ["cfc_synthetic_correction_no_info"], 0.15],
+            ["cfc_synthetic_correction_vague", ["cfc_synthetic_correction_vague"], 0.15],
         ]
-    elif name == "cfc_all_synthetic_a":
+    elif name == "cfc_synthetic_excl":
         training_mixture = [
             ["cfc_track", ["cfc_track"], 0.1],
             ["cfc_target", ["cfc_target"], 0.1],
-            ["cfc_text", ["cfc_text"], 0.1],
-            ["cfc_correction", ["cfc_correction"], 0.15],
-            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.15],
-            ["cfc_correction_a", ["cfc_correction_a"], 0.25],
-            ["cfc_correction_b", ["cfc_correction_b"], 0.15],
-        ]
-    elif name == "cfc_all_synthetic_b":
-        training_mixture = [
-            ["cfc_track", ["cfc_track"], 0.1],
-            ["cfc_target", ["cfc_target"], 0.1],
-            ["cfc_text", ["cfc_text"], 0.1],
-            ["cfc_correction", ["cfc_correction"], 0.2],
-            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.2],
-            ["cfc_correction_b", ["cfc_correction_b"], 0.3],
+            ["cfc_synthetic_correction_full_excl", ["cfc_synthetic_correction_full_excl"], 0.25],
+            ["cfc_synthetic_correction_incomplete_excl", ["cfc_synthetic_correction_incomplete_excl"], 0.15],
+            ["cfc_synthetic_correction_wrong_only_excl", ["cfc_synthetic_correction_wrong_only_excl"], 0.1],
+            ["cfc_synthetic_correction_no_info_excl", ["cfc_synthetic_correction_no_info_excl"], 0.1],
+            ["cfc_synthetic_correction_vague_excl", ["cfc_synthetic_correction_vague_excl"], 0.2]
         ]
     elif name == "cfc_all_real":
         training_mixture = [
-            ["cfc_track", ["cfc_track"], 0.1],
-            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_track", ["cfc_track"], 0.05],
+            ["cfc_target", ["cfc_target"], 0.05],
             # ["cfc_text", ["cfc_text"], 0.05],
             # ["cfc_guided", ["cfc_guided"], 0.1],
-            ["cfc_correction", ["cfc_correction"], 0.1],
-            ["cfc_correction_incomplete", ["cfc_correction_incomplete"], 0.1],
-            ["cfc_correction_real_full", ["cfc_correction_real_full"], 0.2],
-            ["cfc_correction_real_wrong_only", ["cfc_correction_real_wrong_only"], 0.2],
-            ["cfc_correction_real_vague", ["cfc_correction_real_vague"], 0.2],
-            ["cfc_correction_real_no_info", ["cfc_correction_real_no_info"], 0.2]
+            ["cfc_synthetic_correction_full", ["cfc_synthetic_correction_full"], 0.15],
+            ["cfc_synthetic_correction_vague", ["cfc_synthetic_correction_vague"], 0.15],
+            ["cfc_synthetic_correction_wrong_only", ["cfc_synthetic_correction_wrong_only"], 0.1],
+            ["cfc_synthetic_correction_no_info", ["cfc_synthetic_correction_no_info"], 0.1],
+            ["cfc_synthetic_correction_incomplete", ["cfc_synthetic_correction_incomplete"], 0.1],
+            ["cfc_correction_real_full_easy", ["cfc_correction_real_full_easy"], 0.1],
+            ["cfc_correction_real_wrong_only_easy", ["cfc_correction_real_wrong_only_easy"], 0.05],
+            ["cfc_correction_real_vague_easy", ["cfc_correction_real_vague_easy"], 0.05],
+            ["cfc_correction_real_no_info_easy", ["cfc_correction_real_no_info_easy"], 0.05]
+        ]
+    elif name == "cfc_correction":
+        training_mixture = [
+            ["cfc_track", ["cfc_track"], 0.15],
+            ["cfc_target", ["cfc_target"], 0.1],
+            ["cfc_text", ["cfc_text"], 0.05],
+            ["cfc_synthetic_correction_full", ["cfc_synthetic_correction_full"], 0.1],
+            ["cfc_synthetic_correction_incomplete", ["cfc_synthetic_correction_incomplete"], 0.1],
+            ["cfc_synthetic_correction_wrong_only", ["cfc_synthetic_correction_wrong_only"], 0.025],
+            ["cfc_synthetic_correction_no_info", ["cfc_synthetic_correction_no_info"], 0.05],
+            ["cfc_synthetic_correction_vague", ["cfc_synthetic_correction_vague"], 0.1],
+            ["cfc_correction_real_full_easy", ["cfc_correction_real_full_easy"], 0.05],
+            ["cfc_correction_real_wrong_only_easy", ["cfc_correction_real_wrong_only_easy"], 0.025],
+            ["cfc_correction_real_vague_easy", ["cfc_correction_real_vague_easy"], 0.05],
+            ["cfc_correction_real_no_info_easy", ["cfc_correction_real_no_info_easy"], 0.025]
+            ["cfc_correction_real_full_hard", ["cfc_correction_real_full_hard"], 0.05],
+            ["cfc_correction_real_wrong_only_hard", ["cfc_correction_real_wrong_only_hard"], 0.025],
+            ["cfc_correction_real_vague_hard", ["cfc_correction_real_vague_hard"], 0.05],
+            ["cfc_correction_real_no_info_hard", ["cfc_correction_real_no_info_hard"], 0.05]
         ]
     elif name in ["molmo_point", "molmo_point_long_context"]:
         pointing_high_res = 0.30
@@ -597,20 +616,40 @@ def main():
     elif args.mixture in INDIVIDUAL_DATASETS:
         loss_eval_tasks = [f'{args.mixture}:{args.val_split}']
         eval_tasks=[]
-    elif args.mixture in ["cfc_base", "cfc_all_synthetic", "cfc_all_real", "cfc_all_synthetic_a", "cfc_all_synthetic_b"]:
+    elif args.mixture in ["cfc_base"]:
         loss_eval_tasks = [f'{task}:{args.val_split}' for task in [
-                                                                # "cfc_track", 
+                                                                "cfc_track", 
+                                                                "cfc_target", 
+                                                                ]]
+        eval_tasks = []
+    elif args.mixture in ["cfc_all_real", "cfc_correction"]:
+        loss_eval_tasks = [f'{task}:{args.val_split}' for task in [
+                                                                "cfc_track", 
                                                                 # "cfc_target", 
                                                                 # "cfc_text", 
                                                                 # "cfc_guided", 
-                                                                # "cfc_correction", 
-                                                                # "cfc_correction_incomplete",
-                                                                # "cfc_correction_a",
-                                                                # "cfc_correction_b",
-                                                                "cfc_correction_real_full",
-                                                                "cfc_correction_real_wrong_only",
-                                                                "cfc_correction_real_vague",
-                                                                "cfc_correction_real_no_info",
+                                                                "cfc_synthetic_correction_full",
+                                                                "cfc_synthetic_correction_incomplete",
+                                                                "cfc_correction_real_full_easy",
+                                                                # "cfc_correction_real_wrong_only_easy",
+                                                                # "cfc_correction_real_vague_easy",
+                                                                # "cfc_correction_real_no_info_easy",
+                                                                ]]
+        eval_tasks = []
+    elif args.mixture in ["cfc_all_synthetic"]:
+        loss_eval_tasks = [f'{task}:{args.val_split}' for task in [
+                                                                "cfc_track",
+                                                                "cfc_synthetic_correction_full",
+                                                                "cfc_synthetic_correction_incomplete",
+                                                                "cfc_synthetic_correction_no_info",
+                                                                ]]
+        eval_tasks = []
+    elif args.mixture in ["cfc_synthetic_excl"]:
+        loss_eval_tasks = [f'{task}:{args.val_split}' for task in [
+                                                                "cfc_track",
+                                                                "cfc_synthetic_correction_full_excl",
+                                                                "cfc_synthetic_correction_incomplete_excl",
+                                                                "cfc_synthetic_correction_no_info_excl",
                                                                 ]]
         eval_tasks = []
     else:
