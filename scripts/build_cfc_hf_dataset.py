@@ -33,10 +33,18 @@ from datasets import Dataset, DatasetDict, Features, Sequence, Value
 
 from olmo.data.academic_video_track_datasets import (
     CFC,
-    CFCCorrectionRealFull,
-    CFCCorrectionRealNoInfo,
-    CFCCorrectionRealVague,
-    CFCCorrectionRealWrongOnly,
+    CFCCorrectionRealFullEasy,
+    CFCCorrectionRealNoInfoEasy,
+    CFCCorrectionRealVagueEasy,
+    CFCCorrectionRealWrongOnlyEasy,
+    CFCCorrectionRealFullHard,
+    CFCCorrectionRealNoInfoHard,
+    CFCCorrectionRealVagueHard,
+    CFCCorrectionRealWrongOnlyHard,
+    CFCCorrectionRealYOLOFull,
+    CFCCorrectionRealYOLONoInfo,
+    CFCCorrectionRealYOLOVague,
+    CFCCorrectionRealYOLOWrongOnly,
     CFCCorrectionSyntheticFull,
     CFCCorrectionSyntheticIncomplete,
     CFCCorrectionSyntheticNoInfo,
@@ -78,16 +86,37 @@ CONFIGS = {
         family="correction", cls=CFCCorrectionSyntheticNoInfo, mask_mode="video_gt", splits=V2_SPLITS),
     "cfc_synthetic_correction_incomplete": dict(
         family="correction", cls=CFCCorrectionSyntheticIncomplete, mask_mode="final_step", splits=V2_SPLITS),
-    "cfc_correction_real_full": dict(
-        family="correction", cls=CFCCorrectionRealFull, mask_mode="video_gt", splits=V2_SPLITS),
-    "cfc_correction_real_wrong_only": dict(
-        # no val jsonl exists for this tier — train only
-        family="correction", cls=CFCCorrectionRealWrongOnly, mask_mode="video_gt",
+    "cfc_correction_real_full_easy": dict(
+        family="correction", cls=CFCCorrectionRealFullEasy, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_wrong_only_easy": dict(
+        # no val-easy jsonl exists for this tier — train only
+        family="correction", cls=CFCCorrectionRealWrongOnlyEasy, mask_mode="video_gt",
         splits={"train": "all-rivers-train-v2"}),
-    "cfc_correction_real_vague": dict(
-        family="correction", cls=CFCCorrectionRealVague, mask_mode="video_gt", splits=V2_SPLITS),
-    "cfc_correction_real_no_info": dict(
-        family="correction", cls=CFCCorrectionRealNoInfo, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_vague_easy": dict(
+        family="correction", cls=CFCCorrectionRealVagueEasy, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_no_info_easy": dict(
+        family="correction", cls=CFCCorrectionRealNoInfoEasy, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_full_hard": dict(
+        family="correction", cls=CFCCorrectionRealFullHard, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_wrong_only_hard": dict(
+        family="correction", cls=CFCCorrectionRealWrongOnlyHard, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_vague_hard": dict(
+        family="correction", cls=CFCCorrectionRealVagueHard, mask_mode="video_gt", splits=V2_SPLITS),
+    "cfc_correction_real_no_info_hard": dict(
+        family="correction", cls=CFCCorrectionRealNoInfoHard, mask_mode="video_gt", splits=V2_SPLITS),
+    # YOLO-SORT step-0 tracks vs COCO GT — val only
+    "cfc_correction_real_yolo_full": dict(
+        family="correction", cls=CFCCorrectionRealYOLOFull, mask_mode="video_gt",
+        splits={"validation": "all-rivers-val-v2"}),
+    "cfc_correction_real_yolo_wrong_only": dict(
+        family="correction", cls=CFCCorrectionRealYOLOWrongOnly, mask_mode="video_gt",
+        splits={"validation": "all-rivers-val-v2"}),
+    "cfc_correction_real_yolo_vague": dict(
+        family="correction", cls=CFCCorrectionRealYOLOVague, mask_mode="video_gt",
+        splits={"validation": "all-rivers-val-v2"}),
+    "cfc_correction_real_yolo_no_info": dict(
+        family="correction", cls=CFCCorrectionRealYOLONoInfo, mask_mode="video_gt",
+        splits={"validation": "all-rivers-val-v2"}),
     "cfc_text": dict(
         family="text", cls=CFCText, mask_mode=None,
         splits={"train": "kenai-train", "validation": "kenai-val"}),
@@ -508,8 +537,10 @@ corresponds to native frame `3 * i`.
 | `cfc_target` | track (one row per query; qid `0` = all fish, others = referred subsets) | train / validation |
 | `cfc_synthetic_correction_full` / `_vague` / `_wrong_only` / `_no_info` | correction, synthetically corrupted step 0 | train / validation |
 | `cfc_synthetic_correction_incomplete` | correction, partial-fix target (GT = final step, NOT the full video GT) | train / validation |
-| `cfc_correction_real_full` / `_vague` / `_no_info` | correction, real model-prediction step 0 | train / validation |
-| `cfc_correction_real_wrong_only` | correction (real) | train only |
+| `cfc_correction_real_full_easy` / `_vague_easy` / `_no_info_easy` | correction, real model-prediction step 0 (easy set) | train / validation |
+| `cfc_correction_real_wrong_only_easy` | correction, real (easy set) | train only |
+| `cfc_correction_real_full_hard` / `_vague_hard` / `_wrong_only_hard` / `_no_info_hard` | correction, real model-prediction step 0 (hard set) | train / validation |
+| `cfc_correction_real_yolo_full` / `_vague` / `_wrong_only` / `_no_info` | correction, YOLO-SORT tracker step 0 | validation only |
 | `cfc_text` | text-only correction (no masks, no video input at train time) | train / validation |
 
 ## Schema

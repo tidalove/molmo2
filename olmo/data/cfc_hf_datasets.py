@@ -264,26 +264,74 @@ class CFCSyntheticCorrectionIncompleteHF(CFCCorrectionHFBase):
     HF_CONFIG = "cfc_synthetic_correction_incomplete"
 
 
-class CFCCorrectionRealFullHF(CFCCorrectionHFBase):
-    DATASET_NAME = "cfc_hf_correction_real_full"
-    HF_CONFIG = "cfc_correction_real_full"
+class CFCCorrectionRealFullEasyHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_full_easy"
+    HF_CONFIG = "cfc_correction_real_full_easy"
 
 
-class CFCCorrectionRealWrongOnlyHF(CFCCorrectionHFBase):
-    DATASET_NAME = "cfc_hf_correction_real_wrong_only"
-    HF_CONFIG = "cfc_correction_real_wrong_only"
-    # this tier has no validation jsonl -> no validation split on the hub
+class CFCCorrectionRealWrongOnlyEasyHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_wrong_only_easy"
+    HF_CONFIG = "cfc_correction_real_wrong_only_easy"
+    # this tier has no val-easy jsonl -> no validation split on the hub
     SPLIT_MAP = {"train-v2": "train", "train": "train"}
 
 
-class CFCCorrectionRealVagueHF(CFCCorrectionHFBase):
-    DATASET_NAME = "cfc_hf_correction_real_vague"
-    HF_CONFIG = "cfc_correction_real_vague"
+class CFCCorrectionRealVagueEasyHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_vague_easy"
+    HF_CONFIG = "cfc_correction_real_vague_easy"
 
 
-class CFCCorrectionRealNoInfoHF(CFCCorrectionHFBase):
-    DATASET_NAME = "cfc_hf_correction_real_no_info"
-    HF_CONFIG = "cfc_correction_real_no_info"
+class CFCCorrectionRealNoInfoEasyHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_no_info_easy"
+    HF_CONFIG = "cfc_correction_real_no_info_easy"
+
+
+class CFCCorrectionRealFullHardHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_full_hard"
+    HF_CONFIG = "cfc_correction_real_full_hard"
+
+
+class CFCCorrectionRealWrongOnlyHardHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_wrong_only_hard"
+    HF_CONFIG = "cfc_correction_real_wrong_only_hard"
+
+
+class CFCCorrectionRealVagueHardHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_vague_hard"
+    HF_CONFIG = "cfc_correction_real_vague_hard"
+
+
+class CFCCorrectionRealNoInfoHardHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_no_info_hard"
+    HF_CONFIG = "cfc_correction_real_no_info_hard"
+
+
+# YOLO-SORT step-0 tracks vs COCO GT — validation only
+_YOLO_SPLIT_MAP = {"validation-v2": "validation", "validation": "validation"}
+
+
+class CFCCorrectionRealYoloFullHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_yolo_full"
+    HF_CONFIG = "cfc_correction_real_yolo_full"
+    SPLIT_MAP = _YOLO_SPLIT_MAP
+
+
+class CFCCorrectionRealYoloWrongOnlyHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_yolo_wrong_only"
+    HF_CONFIG = "cfc_correction_real_yolo_wrong_only"
+    SPLIT_MAP = _YOLO_SPLIT_MAP
+
+
+class CFCCorrectionRealYoloVagueHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_yolo_vague"
+    HF_CONFIG = "cfc_correction_real_yolo_vague"
+    SPLIT_MAP = _YOLO_SPLIT_MAP
+
+
+class CFCCorrectionRealYoloNoInfoHF(CFCCorrectionHFBase):
+    DATASET_NAME = "cfc_hf_correction_real_yolo_no_info"
+    HF_CONFIG = "cfc_correction_real_yolo_no_info"
+    SPLIT_MAP = _YOLO_SPLIT_MAP
 
 
 # ── Text-only corrections ──────────────────────────────────────────────────
@@ -302,9 +350,17 @@ CFC_HF_CLASSES = [
     CFCSyntheticCorrectionWrongOnlyHF,
     CFCSyntheticCorrectionNoInfoHF,
     CFCSyntheticCorrectionIncompleteHF,
-    CFCCorrectionRealFullHF,
-    CFCCorrectionRealWrongOnlyHF,
-    CFCCorrectionRealVagueHF,
-    CFCCorrectionRealNoInfoHF,
+    CFCCorrectionRealFullEasyHF,
+    CFCCorrectionRealWrongOnlyEasyHF,
+    CFCCorrectionRealVagueEasyHF,
+    CFCCorrectionRealNoInfoEasyHF,
+    CFCCorrectionRealFullHardHF,
+    CFCCorrectionRealWrongOnlyHardHF,
+    CFCCorrectionRealVagueHardHF,
+    CFCCorrectionRealNoInfoHardHF,
+    CFCCorrectionRealYoloFullHF,
+    CFCCorrectionRealYoloWrongOnlyHF,
+    CFCCorrectionRealYoloVagueHF,
+    CFCCorrectionRealYoloNoInfoHF,
     CFCTextHF,
 ]

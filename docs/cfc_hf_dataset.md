@@ -13,8 +13,8 @@ pipeline:
 | `scripts/verify_cfc_hf_dataset.py` | asserts old-vs-new parity + hub smoke test |
 
 Loader names are registered in `olmo/data/get_dataset.py` (`cfc_hf_track`,
-`cfc_hf_correction_real_full_eval_2fps`, …) — same naming scheme as the local
-`cfc_*` registrations they mirror.
+`cfc_hf_correction_real_full_easy_eval_2fps`, …) — same naming scheme as the
+local `cfc_*` registrations they mirror.
 
 ## Conventions baked into the release
 
@@ -46,7 +46,7 @@ python scripts/build_cfc_hf_dataset.py --dry-run --max-rows 20
 python scripts/build_cfc_hf_dataset.py --local-cache
 
 # just one config after editing its source jsonl
-python scripts/build_cfc_hf_dataset.py --configs cfc_correction_real_full --local-cache
+python scripts/build_cfc_hf_dataset.py --configs cfc_correction_real_full_easy --local-cache
 
 # remove hub configs that no longer exist in CONFIGS
 python scripts/build_cfc_hf_dataset.py --prune
@@ -131,7 +131,9 @@ annotations}]}]}`.
        HF_CONFIG = "my_correction"
    ```
    Train-only tier? Set `SPLIT_MAP = {"train-v2": "train", "train": "train"}`
-   (see `CFCCorrectionRealWrongOnlyHF`).
+   (see `CFCCorrectionRealWrongOnlyEasyHF`). Val-only tier? Set
+   `SPLIT_MAP = {"validation-v2": "validation", "validation": "validation"}`
+   (see the `CFCCorrectionRealYolo*HF` classes).
 4. Register + rebuild as above. Add the pair to `PAIRS` in
    `verify_cfc_hf_dataset.py` if a local twin exists.
 
@@ -146,8 +148,18 @@ your inputs.
 
 ## What's on the hub (as of 2026-07)
 
-12 configs: `cfc_track`, `cfc_target`,
+20 configs: `cfc_track`, `cfc_target`,
 `cfc_synthetic_correction_{full,vague,wrong_only,no_info,incomplete}`,
-`cfc_correction_real_{full,wrong_only,vague,no_info}` (wrong_only train-only),
+`cfc_correction_real_{full,wrong_only,vague,no_info}_easy` (wrong_only
+train-only — no val-easy jsonl exists),
+`cfc_correction_real_{full,wrong_only,vague,no_info}_hard` (train+validation),
+`cfc_correction_real_yolo_{full,wrong_only,vague,no_info}` (validation-only,
+YOLO-SORT step-0 tracks),
 `cfc_text` (kenai text corrections, no masks, no videos). Eel and
 kenai-channel are deliberately excluded.
+
+Real-correction naming: the **easy** set is the current prompting regime
+(`-easy` jsonls); the **hard** set is the earlier only-wrong-videos-prompted
+regime (`-hard` jsonls, formerly `-old`). Both share ID_TAG `_real`, so
+example ids collide across easy/hard by design (same videos/trajectory
+namespace, different prompts/step-0 tracks).

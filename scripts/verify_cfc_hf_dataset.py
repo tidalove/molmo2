@@ -39,15 +39,29 @@ PAIRS = {
     "cfc_hf_synthetic_correction_wrong_only_eval_2fps": "cfc_synthetic_correction_wrong_only_eval_2fps",
     "cfc_hf_synthetic_correction_no_info_eval_2fps": "cfc_synthetic_correction_no_info_eval_2fps",
     "cfc_hf_synthetic_correction_incomplete_eval_2fps": "cfc_synthetic_correction_incomplete_eval_2fps",
-    "cfc_hf_correction_real_full_eval_2fps": "cfc_correction_real_full_eval_2fps",
-    "cfc_hf_correction_real_wrong_only_eval_2fps": "cfc_correction_real_wrong_only_eval_2fps",
-    "cfc_hf_correction_real_vague_eval_2fps": "cfc_correction_real_vague_eval_2fps",
-    "cfc_hf_correction_real_no_info_eval_2fps": "cfc_correction_real_no_info_eval_2fps",
+    "cfc_hf_correction_real_full_easy_eval_2fps": "cfc_correction_real_full_easy_eval_2fps",
+    "cfc_hf_correction_real_wrong_only_easy_eval_2fps": "cfc_correction_real_wrong_only_easy_eval_2fps",
+    "cfc_hf_correction_real_vague_easy_eval_2fps": "cfc_correction_real_vague_easy_eval_2fps",
+    "cfc_hf_correction_real_no_info_easy_eval_2fps": "cfc_correction_real_no_info_easy_eval_2fps",
+    "cfc_hf_correction_real_full_hard_eval_2fps": "cfc_correction_real_full_hard_eval_2fps",
+    "cfc_hf_correction_real_wrong_only_hard_eval_2fps": "cfc_correction_real_wrong_only_hard_eval_2fps",
+    "cfc_hf_correction_real_vague_hard_eval_2fps": "cfc_correction_real_vague_hard_eval_2fps",
+    "cfc_hf_correction_real_no_info_hard_eval_2fps": "cfc_correction_real_no_info_hard_eval_2fps",
+    "cfc_hf_correction_real_yolo_full_eval_2fps": "cfc_correction_real_yolo_full_eval_2fps",
+    "cfc_hf_correction_real_yolo_wrong_only_eval_2fps": "cfc_correction_real_yolo_wrong_only_eval_2fps",
+    "cfc_hf_correction_real_yolo_vague_eval_2fps": "cfc_correction_real_yolo_vague_eval_2fps",
+    "cfc_hf_correction_real_yolo_no_info_eval_2fps": "cfc_correction_real_yolo_no_info_eval_2fps",
     "cfc_hf_text_eval_2fps": "cfc_text_eval_2fps",
 }
 
-# validation-only exceptions: real wrong-only has no val jsonl
-TRAIN_ONLY = {"cfc_hf_correction_real_wrong_only_eval_2fps"}
+# split exceptions: real wrong-only easy has no val jsonl; yolo sets are val-only
+TRAIN_ONLY = {"cfc_hf_correction_real_wrong_only_easy_eval_2fps"}
+VAL_ONLY = {
+    "cfc_hf_correction_real_yolo_full_eval_2fps",
+    "cfc_hf_correction_real_yolo_wrong_only_eval_2fps",
+    "cfc_hf_correction_real_yolo_vague_eval_2fps",
+    "cfc_hf_correction_real_yolo_no_info_eval_2fps",
+}
 
 
 def subsampled(frames):
@@ -172,7 +186,11 @@ def main():
 
     names = args.configs or list(PAIRS)
     for new_name in names:
-        split = "train-v2" if new_name in TRAIN_ONLY and args.split != "train-v2" else args.split
+        split = args.split
+        if new_name in TRAIN_ONLY and split != "train-v2":
+            split = "train-v2"
+        if new_name in VAL_ONLY and split != "validation-v2":
+            split = "validation-v2"
         verify_pair(new_name, PAIRS[new_name], split, args.n_samples, rng)
 
     if args.hub:
